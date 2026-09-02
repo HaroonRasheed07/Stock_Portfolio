@@ -1,0 +1,235 @@
+@import "tailwindcss";
+
+/* ══════════════════════════════════════════════════════════════
+   DESIGN TOKENS
+   ══════════════════════════════════════════════════════════════ */
+
+:root {
+  color-scheme: dark;
+  --bg-page: #0a0d14;
+  --bg-card: #121824;
+  --bg-inset: #0a0d14;
+  --border-color: #1e293b;
+  --border-strong: #334155;
+  --card-shadow: none;
+  --text-primary: #f1f5f9;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+}
+
+html.light {
+  color-scheme: light;
+  --bg-page: #eef1f6;
+  --bg-card: #ffffff;
+  --bg-inset: #f4f5f9;
+  --border-color: #dce1ea;
+  --border-strong: #c5cdd9;
+  --card-shadow: 0 1px 3px rgba(15,23,42,0.04), 0 4px 16px -6px rgba(15,23,42,0.08);
+  --text-primary: #172033;
+  --text-secondary: #4b5a72;
+  --text-muted: #7e8da4;
+}
+
+body {
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+html { scroll-behavior: smooth; }
+
+/* ── Selection ── */
+::selection { background: rgba(56, 189, 248, 0.3); }
+html.light ::selection { background: rgba(26, 111, 181, 0.15); }
+
+/* ── Scrollbars ── */
+::-webkit-scrollbar { width: 7px; height: 7px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #475569; }
+html.light ::-webkit-scrollbar-thumb { background: #c3cdd9; }
+html.light ::-webkit-scrollbar-thumb:hover { background: #a3b0c2; }
+
+/* ══════════════════════════════════════════════════════════════
+   LIGHT THEME — ATTRIBUTE SELECTORS
+
+   Tailwind CSS v4 places utility classes inside @layer utilities.
+   Standard CSS class selectors may not match due to v4's escaping
+   or layer cascade rules. Attribute selectors like [class~="..."]
+   match the raw class attribute string and are GUARANTEED to work.
+   ══════════════════════════════════════════════════════════════ */
+
+/* ── Global surface overrides ── */
+html.light [class~="bg-[#0a0d14]"] {
+  background-color: var(--bg-inset) !important;
+}
+html.light [class~="bg-[#121824]"] {
+  background-color: var(--bg-card) !important;
+  box-shadow: var(--card-shadow) !important;
+}
+html.light [class~="border-[#1e293b]"] {
+  border-color: var(--border-color) !important;
+}
+html.light [class~="divide-[#1e293b]"] > :not([hidden]) ~ :not([hidden]) {
+  border-color: var(--border-color) !important;
+}
+
+/* ── Sidebar: flat, white, no shadow ── */
+html.light aside[class~="bg-[#121824]"] {
+  background-color: #ffffff !important;
+  box-shadow: none !important;
+  border-right-color: var(--border-color) !important;
+}
+
+/* ── Header: frosted glass ── */
+html.light header {
+  background-color: rgba(255, 255, 255, 0.82) !important;
+  backdrop-filter: blur(16px) saturate(140%);
+  border-bottom-color: var(--border-color) !important;
+}
+
+/* ── Table thead ── */
+html.light thead[class~="bg-[#0a0d14]"] {
+  background-color: #f6f7fb !important;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   TEXT RAMP
+   ══════════════════════════════════════════════════════════════ */
+
+html.light .text-slate-100 { color: #172033 !important; }
+html.light .text-slate-200 { color: #253349 !important; }
+html.light .text-slate-300 { color: #3d4e67 !important; }
+html.light .text-slate-400 { color: #5c6d85 !important; }
+html.light .text-slate-500 { color: #7e8da4 !important; }
+html.light .text-slate-600 { color: #99a5b8 !important; }
+
+/* ══════════════════════════════════════════════════════════════
+   SKELETON LOADERS
+   ══════════════════════════════════════════════════════════════ */
+
+html.light .bg-slate-800 { background-color: #e4e8f0 !important; }
+html.light .bg-slate-800\/60 { background-color: rgba(228, 232, 240, 0.6) !important; }
+html.light .bg-slate-800\/40 { background-color: rgba(228, 232, 240, 0.4) !important; }
+
+/* ══════════════════════════════════════════════════════════════
+   INTERACTIVE STATES
+   ══════════════════════════════════════════════════════════════ */
+
+html.light .hover\:bg-slate-800:hover { background-color: #e8ecf3 !important; }
+html.light .hover\:bg-slate-800\/60:hover { background-color: #e8ecf3 !important; }
+html.light .hover\:border-slate-700:hover { border-color: var(--border-strong) !important; }
+html.light tr.hover\:bg-slate-800\/40:hover { background-color: #f0f3f9 !important; }
+html.light tr[class~="hover:bg-[#0a0d14]/50"]:hover { background-color: #f0f3f9 !important; }
+html.light .hover\:bg-sky-500\/10:hover { background-color: #e6f0fa !important; }
+html.light [class~="hover:bg-[#0a0d14]"]:hover { background-color: #f0f3f9 !important; }
+html.light [class~="hover:bg-[#0a0d14]/50"]:hover { background-color: #f0f3f9 !important; }
+html.light .hover\:text-slate-200:hover { color: #253349 !important; }
+html.light .hover\:text-sky-300:hover { color: #1a6fb5 !important; }
+html.light .hover\:text-sky-400:hover { color: #1a6fb5 !important; }
+html.light .hover\:text-rose-400:hover { color: #c42b1c !important; }
+
+/* ══════════════════════════════════════════════════════════════
+   FORM CONTROLS
+   ══════════════════════════════════════════════════════════════ */
+
+html.light input,
+html.light select,
+html.light textarea {
+  background-color: #ffffff !important;
+  color: #172033 !important;
+  border-color: #d4dae4 !important;
+  box-shadow: 0 1px 2px rgba(15,23,42,0.04) !important;
+}
+html.light input::placeholder,
+html.light textarea::placeholder { color: #8b96a8 !important; }
+html.light input:focus,
+html.light select:focus,
+html.light textarea:focus {
+  border-color: #7db8e0 !important;
+  outline: none !important;
+  box-shadow: 0 0 0 3px rgba(26, 111, 181, 0.12) !important;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   FINANCIAL SEMANTICS
+   ══════════════════════════════════════════════════════════════ */
+
+html.light .text-emerald-400 { color: #0d7a4a !important; }
+html.light .text-emerald-500 { color: #0d7a4a !important; }
+html.light .text-rose-400 { color: #c42b1c !important; }
+html.light .text-rose-500 { color: #c42b1c !important; }
+html.light .text-red-300 { color: #c42b1c !important; }
+html.light .text-red-200 { color: #a12218 !important; }
+html.light .text-amber-400 { color: #9a6b00 !important; }
+html.light .text-sky-300 { color: #1a6fb5 !important; }
+html.light .text-sky-400 { color: #1a6fb5 !important; }
+
+/* Badge tints — attribute selectors for opacity variants */
+html.light [class*="bg-emerald-500/10"] { background-color: #e8f5ee !important; }
+html.light [class*="bg-emerald-500/5"] { background-color: #e8f5ee !important; }
+html.light [class*="border-emerald-500/20"] { border-color: #b8dcc8 !important; }
+html.light [class*="border-emerald-500/30"] { border-color: #b8dcc8 !important; }
+
+html.light [class*="bg-rose-500/10"] { background-color: #fde8e6 !important; }
+html.light [class*="bg-red-500/10"] { background-color: #fde8e6 !important; }
+html.light [class*="border-rose-500/20"] { border-color: #e8b4b0 !important; }
+html.light [class*="border-red-500/20"] { border-color: #e8b4b0 !important; }
+
+html.light [class*="bg-amber-500/10"] { background-color: #fdf3e0 !important; }
+html.light [class*="border-amber-500/20"] { border-color: #e2cc8a !important; }
+html.light [class*="border-amber-500/30"] { border-color: #e2cc8a !important; }
+
+html.light [class*="bg-sky-500/10"] { background-color: #e4f0fb !important; }
+html.light [class*="bg-sky-500/20"] { background-color: #d0e4f6 !important; }
+html.light [class*="border-sky-500/20"] { border-color: #a8cce4 !important; }
+html.light [class*="border-sky-500/30"] { border-color: #a8cce4 !important; }
+
+html.light .bg-sky-600 { background-color: #1a6fb5 !important; }
+html.light .bg-sky-600:hover { background-color: #1560a0 !important; }
+html.light .bg-emerald-600 { background-color: #0d7a4a !important; }
+html.light .bg-emerald-600:hover { background-color: #0a6840 !important; }
+
+/* Slate / neutral badges */
+html.light .bg-slate-500\/10 { background-color: #eaeef4 !important; }
+html.light [class*="border-slate-700"] { border-color: var(--border-color) !important; }
+html.light [class*="border-slate-600"] { border-color: var(--border-strong) !important; }
+
+/* LOW impact / neutral / type badges: bg-slate-800 text-slate-400 */
+html.light .bg-slate-800.text-slate-400 { background-color: #eef1f6 !important; color: #5c6d85 !important; }
+html.light [class~="bg-[#0a0d14]"].text-slate-400 { background-color: #eef1f6 !important; color: #5c6d85 !important; }
+
+/* Alert accent rail */
+html.light .border-l-sky-500 { border-left-color: #1a6fb5 !important; }
+
+/* ══════════════════════════════════════════════════════════════
+   RECHARTS
+   ══════════════════════════════════════════════════════════════ */
+
+html.light .recharts-tooltip-wrapper .recharts-default-tooltip {
+  background-color: #ffffff !important;
+  border-color: #dce1ea !important;
+  color: #172033 !important;
+}
+html.light .recharts-tooltip-wrapper .recharts-tooltip-item {
+  color: #3d4e67 !important;
+}
+html.light .recharts-cartesian-axis-tick text {
+  fill: #7e8da4 !important;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   LINE CLAMP
+   ══════════════════════════════════════════════════════════════ */
+
+.line-clamp-2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.line-clamp-6 {
+  display: -webkit-box;
+  -webkit-line-clamp: 6;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}

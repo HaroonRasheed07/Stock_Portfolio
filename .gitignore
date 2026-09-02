@@ -1,0 +1,54 @@
+# ── Environment & Secrets ──────────────────
+.env
+.env.local
+.env.production
+*.env
+
+# ── Database ───────────────────────────────
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+data/uploads/
+
+# ── Portfolio Data (real financial info) ───
+*.csv
+!Holdings-*.csv.example
+
+# ── Python ─────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+.venv/
+venv/
+env/
+
+# ── Node ───────────────────────────────────
+node_modules/
+.next/
+out/
+build/
+
+# ── IDE ────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── OS ─────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Logs ───────────────────────────────────
+*.log
+logs/
+
+# ── Cache ──────────────────────────────────
+.cache/
+*.pyc
