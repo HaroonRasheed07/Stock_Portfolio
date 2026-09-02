@@ -522,8 +522,22 @@ class YFinanceProvider(MarketDataProvider, FundamentalDataProvider, NewsProvider
                 result["data_status"] = "success"
                 _t("price", symbol, cache_hit=False, dur=dur_ms)
             elif isinstance(result, dict):
-                # Provider responded but no price (delisted/unknown symbol)
-                cat = classify_error(message="no price in response (possibly delisted)")
+                # Provider responded but no price
+                # Try fallback: maybe Ticker.info failed but yf.download() works
+                logger.info(f"Ticker.info returned no price for {symbol}, trying fallback download fetch...")
+                fallback = await self._fetch_price_via_download(symbol)
+                if fallback and fallback.get("price"):
+                    logger.info(f"Fallback download succeeded for {symbol}: ${fallback.get('price')}")
+                    self._on_success()
+                    self._set_cached(self._price_cache, symbol, fallback)
+                    _breaker.record_success()
+                    _health.record_success("yahoo", dur_ms + (time.time() - start) * 1000, ticker=symbol, op="price_fallback")
+                    fallback["status"] = "success"
+                    fallback["data_status"] = "success"
+                    return fallback
+                
+                # Fallback also failed - likely delisted/unknown symbol
+                cat = classify_error(message="no price in response after fallback (possibly delisted)")
                 _health.record_failure("yahoo", cat,
                                        f"No price data returned for {symbol}",
                                        duration_ms=dur_ms, ticker=symbol, op="price")
@@ -604,10 +618,23 @@ class YFinanceProvider(MarketDataProvider, FundamentalDataProvider, NewsProvider
                 self._on_success()
                 self._set_cached(self._price_cache, f"hist_{cache_key}", result)
                 _t("history", symbol, cache_hit=False, dur=dur_ms)
-            else:
-                _t("history", symbol, cache_hit=False, success=False,
-                   failure_category="not_found", dur=dur_ms)
-            return result
+                return result
+            
+            # Empty result from Ticker.history() - try fallback via yf.download()
+            logger.info(f"Historical data for {symbol} returned empty, trying yf.download() fallback...")
+            fallback_df = await self._fetch_historical_via_download(symbol, period, interval)
+            dur_ms = (time.time() - start) * 1000
+            if not fallback_df.empty:
+                logger.info(f"Fallback yf.download() succeeded for {symbol}: {len(fallback_df)} rows")
+                self._on_success()
+                self._set_cached(self._price_cache, f"hist_{cache_key}", fallback_df)
+                _t("history", symbol, cache_hit=False, dur=dur_ms)
+                return fallback_df
+            
+            # Both methods failed - log and return empty
+            logger.warning(f"No historical data available for {symbol} (Ticker.history + yf.download both empty)")
+            _t("history", symbol, cache_hit=False, success=False,
+               failure_category="no_data", dur=dur_ms)
         except asyncio.TimeoutError:
             dur_ms = (time.time() - start) * 1000
             logger.warning(f"History fetch timed out for {symbol} after 30s")
@@ -641,6 +668,67 @@ class YFinanceProvider(MarketDataProvider, FundamentalDataProvider, NewsProvider
                failure_category=cat, dur=dur_ms)
             return pd.DataFrame()
 
+    async def _fetch_historical_via_download(
+        self, symbol: str, period: str = "1y", interval: str = "1d"
+    ) -> pd.DataFrame:
+        """
+        Fallback method: try to get historical data via yf.download() instead of Ticker.history().
+        Used when Ticker.history() fails or returns empty (common on Render when rate-limited).
+        
+        Returns empty DataFrame if download also fails.
+        """
+        logger.debug(f"FALLBACK: Attempting {symbol} historical via yf.download({period}, {interval})")
+        try:
+            def _fetch():
+                # Try download with same parameters
+                data = yf.download(
+                    symbol, period=period, interval=interval,
+                    progress=False, threads=False
+                )
+                if data is None or data.empty:
+                    return pd.DataFrame()
+                
+                # Normalize to standard format
+                if isinstance(data.index, pd.DatetimeIndex):
+                    data.index.name = "Date"
+                    data = data.reset_index()
+                elif "Date" not in data.columns:
+                    # Some formats don't have a Date column, use index
+                    data = data.reset_index()
+                    if data.columns[0] != "Date":
+                        data = data.rename(columns={data.columns[0]: "Date"})
+                
+                # Handle timezone
+                if "Date" in data.columns and hasattr(data["Date"].dt, "tz"):
+                    if data["Date"].dt.tz is not None:
+                        data["Date"] = data["Date"].dt.tz_localize(None)
+                
+                # Ensure required columns exist and pick them
+                required = ["Date", "Open", "High", "Low", "Close", "Volume"]
+                if all(c in data.columns for c in required):
+                    return data[required]
+                else:
+                    # Try to find columns with flexible naming
+                    cols = {c.lower(): c for c in data.columns}
+                    remap = {}
+                    for req in required:
+                        lower_req = req.lower()
+                        if lower_req in cols:
+                            remap[cols[lower_req]] = req
+                    
+                    if len(remap) >= 5:  # At least have OHLCV
+                        data = data.rename(columns=remap)
+                        available = [req for req in required if req in data.columns]
+                        return data[available] if available else pd.DataFrame()
+                    else:
+                        logger.debug(f"Fallback download missing columns for {symbol}: found {list(data.columns)}")
+                        return pd.DataFrame()
+            
+            result = await asyncio.wait_for(_run_sync(_fetch), timeout=30)
+            return result
+        except Exception as e:
+            logger.debug(f"Fallback download failed for {symbol}: {e}")
+            return pd.DataFrame()
     async def get_batch_prices(self, symbols: List[str]) -> Dict[str, Dict[str, Any]]:
         """Get prices for multiple symbols using yfinance batch download."""
         from app.utils.resilience import get_circuit_breaker
