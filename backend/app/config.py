@@ -8,6 +8,20 @@ from pydantic import Field
 from typing import Optional
 
 
+# Well-known browser/frontend origins that are ALWAYS allowed regardless of
+# environment: local development on localhost plus the production Vercel
+# frontend. These are merged with any additional origins from the
+# CORS_ORIGINS environment variable. Keeping the production origin here means
+# the frontend -> backend connection works from code without relying on manual
+# Render environment-variable edits. These are frontend/browser origins only —
+# the backend URL intentionally is NOT listed.
+ALWAYS_ALLOWED_CORS_ORIGINS: tuple = (
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "https://stock-portfolio-frontend-tau.vercel.app",
+)
+
+
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
@@ -44,8 +58,11 @@ class Settings(BaseSettings):
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_MODEL: str = "llama3"
 
-    # CORS
-    CORS_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000"
+    # CORS (comma-separated browser/frontend origins). These are ADDITIONAL
+    # custom origins merged on top of the always-allowed well-known frontends
+    # (local dev + production Vercel, see ALWAYS_ALLOWED_CORS_ORIGINS below).
+    # Keep browser/frontend origins here only — never the backend URL.
+    CORS_ORIGINS: str = ""
 
     # Data Settings
     MAX_CONCURRENT_REQUESTS: int = 5

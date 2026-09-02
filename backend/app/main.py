@@ -14,7 +14,7 @@ from fastapi import FastAPI, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.config import get_settings
+from app.config import get_settings, ALWAYS_ALLOWED_CORS_ORIGINS
 from app.database import init_db, SessionLocal, get_db
 from app.routes.portfolio import router as portfolio_router
 from app.routes.stocks import router as stocks_router, analytics_router
@@ -197,7 +197,6 @@ async def lifespan(app: FastAPI):
     # Add early_catalyst_watch column if missing
     try:
         import sqlite3
-        from app.config import get_settings
         settings = get_settings()
         db_path = str(settings.DATA_DIR / "portfolio.db")
         conn = sqlite3.connect(db_path)
@@ -239,7 +238,47 @@ app = FastAPI(
 )
 
 # CORS middleware for Next.js frontend
-cors_origins = [o.strip() for o in settings.CORS_ORIGINS.split(",") if o.strip()]
+def _parse_cors_origins(raw: str):
+    """
+    Parse a comma-separated CORS origin string into a deduplicated list.
+
+    - Values are stripped of surrounding whitespace.
+    - Empty entries are ignored.
+    - Duplicate origins are removed (order preserved).
+    - A bare "*" is rejected so wildcard credentials-bypass is never introduced;
+      with allow_credentials=True a wildcard would be invalid anyway.
+    """
+    origins: list = []
+    seen = set()
+    for part in raw.split(","):
+        origin = part.strip()
+        if not origin:  # ignore empty entries
+            continue
+        if origin == "*":
+            raise ValueError(
+                "CORS_ORIGINS must list explicit origins; wildcard '*' is not allowed "
+                "when credentials are enabled."
+            )
+        if origin not in seen:
+            seen.add(origin)
+            origins.append(origin)
+    return origins
+
+
+def _cors_origins():
+    """
+    Effective list of allowed CORS origins.
+
+    Starts from the ALWAYS_ALLOWED_CORS_ORIGINS (localhost dev + production
+    Vercel frontend) so those work from code in every environment, then merges
+    any custom origins supplied via the CORS_ORIGINS environment variable.
+    """
+    return _parse_cors_origins(
+        ",".join(list(ALWAYS_ALLOWED_CORS_ORIGINS) + [settings.CORS_ORIGINS])
+    )
+
+
+cors_origins = _cors_origins()
 # Allow LAN/private-network origins so phones/tablets on the same network can
 # use the app (frontend served from http://<dev-ip>:3000). Local-only app:
 # never allow arbitrary public origins.
@@ -417,7 +456,7 @@ def environment_diagnostics():
         "upload_dir": str(settings.UPLOAD_DIR),
         "backend_host": settings.BACKEND_HOST,
         "backend_port": settings.BACKEND_PORT,
-        "cors_origins": [o.strip() for o in settings.CORS_ORIGINS.split(",") if o.strip()],
+        "cors_origins": _cors_origins(),
         "price_cache_ttl": settings.PRICE_CACHE_TTL,
         "fundamentals_cache_ttl": settings.FUNDAMENTALS_CACHE_TTL,
         "news_cache_ttl": settings.NEWS_CACHE_TTL,
