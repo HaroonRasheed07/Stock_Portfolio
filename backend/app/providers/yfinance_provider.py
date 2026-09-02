@@ -571,9 +571,153 @@ class YFinanceProvider(MarketDataProvider, FundamentalDataProvider, NewsProvider
                 return result
             _t("price", symbol, cache_hit=False, success=False,
                failure_category=cat, dur=dur_ms)
+            # Primary ticker.info path failed. Before giving up, try the
+            # yf.download() fallback which uses a different Yahoo API endpoint
+            # and may not be blocked even when the quoteSummary endpoint is.
+            try:
+                logger.info(
+                    f"get_current_price primary path failed for {symbol} ({cat}), "
+                    f"trying yf.download fallback..."
+                )
+                fallback = await self._fetch_price_via_download(symbol)
+                if fallback and fallback.get("price"):
+                    logger.info(f"Download fallback succeeded for {symbol}: ${fallback.get('price')}")
+                    self._on_success()
+                    self._set_cached(self._price_cache, symbol, fallback)
+                    _breaker.record_success()
+                    _health.record_success(
+                        "yahoo", dur_ms + (time.time() - start) * 1000,
+                        ticker=symbol, op="price_fallback"
+                    )
+                    fallback["status"] = "success"
+                    fallback["data_status"] = "success"
+                    return fallback
+            except Exception as fb_e:
+                logger.warning(f"Price download fallback failed for {symbol}: {fb_e}")
+
+            # Stale-cache fallback before giving up
+            stale = self._price_cache.get(symbol)
+            if stale is not None and (time.time() - stale[1]) < 86400 * 7:
+                logger.info(f"Serving stale price cache for {symbol} after failure ({cat})")
+                result = dict(stale[0])
+                result["from_stale_cache"] = True
+                result["status"] = "stale"
+                result["data_status"] = "stale"
+                _t("price", symbol, cache_hit=False, stale=True,
+                   failure_category=cat, dur=dur_ms)
+                return result
+            _t("price", symbol, cache_hit=False, success=False,
+               failure_category=cat, dur=dur_ms)
             failure = structured_failure(symbol, cat, str(e))
             failure["data_status"] = "unavailable"
             return failure
+
+    async def _fetch_price_via_download(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """
+        Fallback method: get current price via yf.download() instead of Ticker.info.
+
+        yf.download() uses a different Yahoo API path (/v8/finance/chart or CSV
+        download endpoints) that is frequently NOT blocked even when quoteSummary
+        (Ticker.info) is rate-limited. It returns OHLCV bars; we use the last
+        close as the current price.
+
+        Handles both simple columns and MultiIndex columns (yfinance >= 1.0).
+        """
+        try:
+            def _fetch():
+                data = yf.download(
+                    symbol, period="5d", interval="1d",
+                    progress=False, threads=False,
+                )
+                if data is None or data.empty:
+                    return None
+
+                # --- Normalize columns -------------------------------------------------
+                if isinstance(data.columns, pd.MultiIndex):
+                    # Single-symbol download: level 0 = field, level 1 = symbol
+                    fields = list(data.columns.get_level_values(0).unique())
+
+                    def _series(field_name: str):
+                        matches = [f for f in fields if str(f).lower() == field_name]
+                        return data[matches[0]] if matches else None
+
+                    close_s = _series("close")
+                    open_s = _series("open")
+                    high_s = _series("high")
+                    low_s = _series("low")
+                    vol_s = _series("volume")
+                else:
+                    close_s = data["Close"]
+                    open_s = data.get("Open")
+                    high_s = data.get("High")
+                    low_s = data.get("Low")
+                    vol_s = data.get("Volume")
+
+                def _get_value(s, idx: int):
+                    """Extract a scalar from a (possibly nested) Series.</summary>"""
+                    if s is None:
+                        return None
+                    try:
+                        v = s.iloc[idx]
+                    except IndexError:
+                        return None
+                    # v may itself be a Series when MultiIndex slicing returns 1-col frames
+                    while hasattr(v, "__len__") and hasattr(v, "iloc") and len(getattr(v, "shape", (1,))) == 1:
+                        try:
+                            v = v.iloc[0]
+                        except Exception:
+                            break
+                    try:
+                        return float(v)
+                    except (TypeError, ValueError):
+                        return None
+
+                if close_s is None:
+                    return None
+
+                last_close = _get_value(close_s, -1)
+                if last_close is None:
+                    return None
+                prev_close = _get_value(close_s, -2) if len(close_s) > 1 else last_close
+
+                last_open = _get_value(open_s, -1)
+                last_high = _get_value(high_s, -1)
+                last_low = _get_value(low_s, -1)
+
+                last_vol = None
+                if vol_s is not None:
+                    try:
+                        v = vol_s.iloc[-1]
+                        while hasattr(v, "iloc") and len(getattr(v, "shape", (1,))) == 1:
+                            try:
+                                v = v.iloc[0]
+                            except Exception:
+                                break
+                        last_vol = int(v) if v is not None and not np.isnan(v) else 0
+                    except Exception:
+                        last_vol = 0
+
+                change = last_close - prev_close if last_close and prev_close else None
+                change_pct = (change / prev_close * 100) if change and prev_close else None
+
+                return {
+                    "symbol": symbol,
+                    "price": last_close,
+                    "previous_close": prev_close,
+                    "open": last_open,
+                    "day_high": last_high,
+                    "day_low": last_low,
+                    "volume": last_vol,
+                    "change": change,
+                    "change_pct": change_pct,
+                    "currency": "USD",
+                    "source": "yf_download_fallback",
+                }
+
+            return await _run_sync(_fetch)
+        except Exception as e:
+            logger.debug(f"Price download fallback failed for {symbol}: {e}")
+            return None
 
     async def get_historical_prices(
         self, symbol: str, period: str = "1y", interval: str = "1d"
@@ -603,7 +747,12 @@ class YFinanceProvider(MarketDataProvider, FundamentalDataProvider, NewsProvider
         try:
             def _fetch():
                 ticker = self._get_ticker(symbol)
+                # CRITICAL: ticker.history() can return None on Render (Yahoo
+                # blocking datacenter IPs). Guard against it — never call .empty
+                # on None or it crashes as `'NoneType' object has no attribute 'empty'`.
                 df = ticker.history(period=period, interval=interval)
+                if df is None:
+                    return pd.DataFrame()
                 if df.empty:
                     return pd.DataFrame()
                 df.index.name = "Date"
@@ -614,7 +763,7 @@ class YFinanceProvider(MarketDataProvider, FundamentalDataProvider, NewsProvider
 
             result = await asyncio.wait_for(_run_sync(_fetch), timeout=60)
             dur_ms = (time.time() - start) * 1000
-            if not result.empty:
+            if result is not None and not result.empty:
                 self._on_success()
                 self._set_cached(self._price_cache, f"hist_{cache_key}", result)
                 _t("history", symbol, cache_hit=False, dur=dur_ms)
@@ -624,7 +773,7 @@ class YFinanceProvider(MarketDataProvider, FundamentalDataProvider, NewsProvider
             logger.info(f"Historical data for {symbol} returned empty, trying yf.download() fallback...")
             fallback_df = await self._fetch_historical_via_download(symbol, period, interval)
             dur_ms = (time.time() - start) * 1000
-            if not fallback_df.empty:
+            if fallback_df is not None and not fallback_df.empty:
                 logger.info(f"Fallback yf.download() succeeded for {symbol}: {len(fallback_df)} rows")
                 self._on_success()
                 self._set_cached(self._price_cache, f"hist_{cache_key}", fallback_df)
@@ -674,7 +823,10 @@ class YFinanceProvider(MarketDataProvider, FundamentalDataProvider, NewsProvider
         """
         Fallback method: try to get historical data via yf.download() instead of Ticker.history().
         Used when Ticker.history() fails or returns empty (common on Render when rate-limited).
-        
+
+        Handles single-symbol MultiIndex frames (yfinance >= 1.0), where the
+        returned columns are [(Close, sym), (High, sym), ...].
+
         Returns empty DataFrame if download also fails.
         """
         logger.debug(f"FALLBACK: Attempting {symbol} historical via yf.download({period}, {interval})")
@@ -687,7 +839,30 @@ class YFinanceProvider(MarketDataProvider, FundamentalDataProvider, NewsProvider
                 )
                 if data is None or data.empty:
                     return pd.DataFrame()
-                
+
+                # --- Flatten MultiIndex for single-symbol frames -----------------
+                # yfinance>=1.0 single-symbol download: columns are
+                # [(Close, sym), (High, sym), (Low, sym), (Open, sym), (Volume, sym)]
+                if isinstance(data.columns, pd.MultiIndex):
+                    try:
+                        syms = data.columns.get_level_values(1).unique()
+                        target = None
+                        for s in syms:
+                            if str(s).upper() == symbol.upper():
+                                target = s
+                                break
+                        if target is None and len(syms) > 0:
+                            target = syms[0]
+                        if target is not None:
+                            # level 1 is the ticker; select on that level
+                            data = data.xs(target, level=1, axis=1).copy()
+                    except Exception:
+                        # fall back to level-0 fields (already stackable)
+                        try:
+                            data.columns = data.columns.get_level_values(0)
+                        except Exception:
+                            pass
+
                 # Normalize to standard format
                 if isinstance(data.index, pd.DatetimeIndex):
                     data.index.name = "Date"
@@ -697,12 +872,12 @@ class YFinanceProvider(MarketDataProvider, FundamentalDataProvider, NewsProvider
                     data = data.reset_index()
                     if data.columns[0] != "Date":
                         data = data.rename(columns={data.columns[0]: "Date"})
-                
+
                 # Handle timezone
                 if "Date" in data.columns and hasattr(data["Date"].dt, "tz"):
                     if data["Date"].dt.tz is not None:
                         data["Date"] = data["Date"].dt.tz_localize(None)
-                
+
                 # Ensure required columns exist and pick them
                 required = ["Date", "Open", "High", "Low", "Close", "Volume"]
                 if all(c in data.columns for c in required):
@@ -715,7 +890,7 @@ class YFinanceProvider(MarketDataProvider, FundamentalDataProvider, NewsProvider
                         lower_req = req.lower()
                         if lower_req in cols:
                             remap[cols[lower_req]] = req
-                    
+
                     if len(remap) >= 5:  # At least have OHLCV
                         data = data.rename(columns=remap)
                         available = [req for req in required if req in data.columns]
@@ -723,9 +898,9 @@ class YFinanceProvider(MarketDataProvider, FundamentalDataProvider, NewsProvider
                     else:
                         logger.debug(f"Fallback download missing columns for {symbol}: found {list(data.columns)}")
                         return pd.DataFrame()
-            
+
             result = await asyncio.wait_for(_run_sync(_fetch), timeout=30)
-            return result
+            return result if result is not None else pd.DataFrame()
         except Exception as e:
             logger.debug(f"Fallback download failed for {symbol}: {e}")
             return pd.DataFrame()
