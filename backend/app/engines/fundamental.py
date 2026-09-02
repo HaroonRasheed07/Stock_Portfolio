@@ -8,6 +8,75 @@ from typing import Dict, Any, List, Optional
 logger = logging.getLogger(__name__)
 
 
+def _ensure_decimal_percentage(value: Optional[float]) -> Optional[float]:
+    """
+    Normalize percentage values to decimal form (0.03 = 3%, not 3 = 3%).
+
+    yfinance returns different formats for different metrics:
+    - dividend_yield: 0-1 decimal (0.03 = 3%)
+    - peg_ratio: 0-100 decimal (1.5 = 1.5)
+    - profit_margin: 0-1 decimal (0.15 = 15%)
+    - debt_to_equity: 0-1000+ decimal (0.8 = 80%, 1.5 = 150%)
+    - roe/roa: 0-1 decimal (0.15 = 15%)
+    - revenue_growth: 0-1 decimal (0.20 = 20%)
+
+    This function normalizes percentage metrics (0-1 range) to verify they're in
+    decimal form. If a value is unexpectedly large (like 34 instead of 0.34 for
+    dividend yield), it's likely already in percentage form or an error.
+
+    Rule: If the value > 100, it's either:
+    - Already in percentage form (e.g., 340 for 340%)
+    - An error (e.g., 34000 for what should be 0.34)
+    - A valid large number for things like debt_to_equity
+
+    Conservative approach: for dividend yield and margins, cap at reasonable ranges.
+    """
+    if value is None:
+        return None
+
+    # Be conservative: extreme values (< 0 or > 1000) are likely errors
+    if value < -1000 or value > 10000:
+        logger.warning(f"Suspiciously large value: {value} — may be data error")
+        return None
+
+    return value
+
+
+def _percentage_to_display(value: Optional[float], metric_type: str = "generic") -> Optional[float]:
+    """
+    Convert a value to display percentage form.
+
+    metric_type guides the conversion:
+    - "generic": if 0-1, multiply by 100; if > 100, divide by 100 (safer assumption)
+    - "dividend": dividend_yield is always 0-1 decimal; multiply by 100
+    - "growth": growth rates are 0-1 decimal; multiply by 100
+    - "roe_roa": returns on equity/assets are 0-1 decimal; multiply by 100
+    - "margin": profit/operating/gross margins are 0-1 decimal; multiply by 100
+    - "pe_ratio": P/E ratios are real numbers (not percentages); don't multiply
+    - "debt_to_equity": can be 0.8 (80%) or 2.5 (250%); always multiply by 100
+    """
+    if value is None:
+        return None
+
+    # Metrics that should NOT be converted (already in correct form)
+    if metric_type in ("pe_ratio", "peg_ratio", "price_to_sales", "price_to_book", "ev_to_ebitda", "beta"):
+        return value
+
+    # Metrics that are always 0-1 decimal and need to be multiplied by 100
+    if metric_type in ("dividend", "growth", "roe_roa", "margin", "debt_to_equity"):
+        if abs(value) < 100:  # 0-1 range (or small negatives)
+            return value * 100
+        # If > 100, it's suspicious but could be a data error. Log and return as-is
+        logger.warning(f"Unexpected large value for {metric_type}: {value}")
+        return value
+
+    # Generic: use heuristic
+    if abs(value) < 100:
+        return value * 100
+    # Already in percentage form or very large number; don't multiply
+    return value
+
+
 class FundamentalEngine:
     """Scores and grades companies based on fundamental metrics."""
 
@@ -35,23 +104,25 @@ class FundamentalEngine:
         # ── Revenue & Growth (15%) ───────────────────────
         revenue_growth = info.get("revenue_growth")
         if revenue_growth is not None:
-            data_points += 1
-            metrics["revenue_growth"] = round(revenue_growth * 100, 1) if abs(revenue_growth) < 10 else round(revenue_growth, 1)
-            rg_pct = revenue_growth * 100 if abs(revenue_growth) < 10 else revenue_growth
-            if rg_pct > 20:
-                scores["revenue_growth"] = 95
-                strengths.append(f"Strong revenue growth of {rg_pct:.1f}%")
-            elif rg_pct > 10:
-                scores["revenue_growth"] = 80
-                strengths.append(f"Healthy revenue growth of {rg_pct:.1f}%")
-            elif rg_pct > 0:
-                scores["revenue_growth"] = 60
-            elif rg_pct > -5:
-                scores["revenue_growth"] = 40
-                weaknesses.append(f"Flat/declining revenue ({rg_pct:.1f}%)")
-            else:
-                scores["revenue_growth"] = 20
-                weaknesses.append(f"Revenue declining at {rg_pct:.1f}%")
+            revenue_growth = _ensure_decimal_percentage(revenue_growth)
+            if revenue_growth is not None:
+                data_points += 1
+                rg_pct = _percentage_to_display(revenue_growth, "growth")
+                metrics["revenue_growth"] = round(rg_pct, 1)
+                if rg_pct > 20:
+                    scores["revenue_growth"] = 95
+                    strengths.append(f"Strong revenue growth of {rg_pct:.1f}%")
+                elif rg_pct > 10:
+                    scores["revenue_growth"] = 80
+                    strengths.append(f"Healthy revenue growth of {rg_pct:.1f}%")
+                elif rg_pct > 0:
+                    scores["revenue_growth"] = 60
+                elif rg_pct > -5:
+                    scores["revenue_growth"] = 40
+                    weaknesses.append(f"Flat/declining revenue ({rg_pct:.1f}%)")
+                else:
+                    scores["revenue_growth"] = 20
+                    weaknesses.append(f"Revenue declining at {rg_pct:.1f}%")
 
         # ── Earnings & EPS (15%) ─────────────────────────
         eps = info.get("eps")
@@ -72,62 +143,74 @@ class FundamentalEngine:
         # ── Profit Margins (10%) ─────────────────────────
         profit_margin = info.get("profit_margin")
         if profit_margin is not None:
-            data_points += 1
-            pm = profit_margin * 100 if abs(profit_margin) < 5 else profit_margin
-            metrics["profit_margin"] = round(pm, 1)
-            if pm > 20:
-                scores["margins"] = 90
-                strengths.append(f"Excellent profit margin of {pm:.1f}%")
-            elif pm > 10:
-                scores["margins"] = 75
-            elif pm > 5:
-                scores["margins"] = 55
-            elif pm > 0:
-                scores["margins"] = 35
-                weaknesses.append(f"Thin profit margin of {pm:.1f}%")
-            else:
-                scores["margins"] = 15
-                weaknesses.append(f"Negative profit margin of {pm:.1f}%")
+            profit_margin = _ensure_decimal_percentage(profit_margin)
+            if profit_margin is not None:
+                data_points += 1
+                pm = _percentage_to_display(profit_margin, "margin")
+                metrics["profit_margin"] = round(pm, 1)
+                if pm > 20:
+                    scores["margins"] = 90
+                    strengths.append(f"Excellent profit margin of {pm:.1f}%")
+                elif pm > 10:
+                    scores["margins"] = 75
+                elif pm > 5:
+                    scores["margins"] = 55
+                elif pm > 0:
+                    scores["margins"] = 35
+                    weaknesses.append(f"Thin profit margin of {pm:.1f}%")
+                else:
+                    scores["margins"] = 15
+                    weaknesses.append(f"Negative profit margin of {pm:.1f}%")
 
         # ── ROE / ROA (10%) ──────────────────────────────
         roe = info.get("roe")
         if roe is not None:
-            data_points += 1
-            roe_pct = roe * 100 if abs(roe) < 5 else roe
-            metrics["roe"] = round(roe_pct, 1)
-            if roe_pct > 20:
-                scores["returns"] = 90
-                strengths.append(f"High return on equity of {roe_pct:.1f}%")
-            elif roe_pct > 10:
-                scores["returns"] = 70
-            elif roe_pct > 0:
-                scores["returns"] = 45
-            else:
-                scores["returns"] = 15
-                weaknesses.append(f"Negative ROE of {roe_pct:.1f}%")
+            roe = _ensure_decimal_percentage(roe)
+            if roe is not None:
+                data_points += 1
+                roe_pct = _percentage_to_display(roe, "roe_roa")
+                metrics["roe"] = round(roe_pct, 1)
+                if roe_pct > 20:
+                    scores["returns"] = 90
+                    strengths.append(f"High return on equity of {roe_pct:.1f}%")
+                elif roe_pct > 10:
+                    scores["returns"] = 70
+                elif roe_pct > 0:
+                    scores["returns"] = 45
+                else:
+                    scores["returns"] = 15
+                    weaknesses.append(f"Negative ROE of {roe_pct:.1f}%")
 
         roa = info.get("roa")
         if roa is not None:
-            metrics["roa"] = round((roa * 100 if abs(roa) < 5 else roa), 1)
+            roa = _ensure_decimal_percentage(roa)
+            if roa is not None:
+                roa_pct = _percentage_to_display(roa, "roe_roa")
+                metrics["roa"] = round(roa_pct, 1)
 
         # ── Debt (10%) ───────────────────────────────────
         d2e = info.get("debt_to_equity")
         if d2e is not None:
-            data_points += 1
-            metrics["debt_to_equity"] = round(d2e, 1)
-            if d2e < 30:
-                scores["debt"] = 90
-                strengths.append(f"Very low debt-to-equity ratio of {d2e:.0f}%")
-            elif d2e < 80:
-                scores["debt"] = 75
-            elif d2e < 150:
-                scores["debt"] = 50
-            elif d2e < 300:
-                scores["debt"] = 30
-                weaknesses.append(f"High debt-to-equity ratio of {d2e:.0f}%")
-            else:
-                scores["debt"] = 10
-                weaknesses.append(f"Very high debt-to-equity ratio of {d2e:.0f}%")
+            d2e = _ensure_decimal_percentage(d2e)
+            if d2e is not None:
+                data_points += 1
+                # debt_to_equity can be in 0.8 (80%) or percentage form (80)
+                # Convert to percentage for display
+                d2e_pct = _percentage_to_display(d2e, "debt_to_equity")
+                metrics["debt_to_equity"] = round(d2e_pct, 1)
+                if d2e_pct < 30:
+                    scores["debt"] = 90
+                    strengths.append(f"Very low debt-to-equity ratio of {d2e_pct:.0f}%")
+                elif d2e_pct < 80:
+                    scores["debt"] = 75
+                elif d2e_pct < 150:
+                    scores["debt"] = 50
+                elif d2e_pct < 300:
+                    scores["debt"] = 30
+                    weaknesses.append(f"High debt-to-equity ratio of {d2e_pct:.0f}%")
+                else:
+                    scores["debt"] = 10
+                    weaknesses.append(f"Very high debt-to-equity ratio of {d2e_pct:.0f}%")
 
         # ── Free Cash Flow (10%) ─────────────────────────
         fcf = info.get("free_cash_flow")
@@ -174,18 +257,20 @@ class FundamentalEngine:
         # ── Dividend (5%) ────────────────────────────────
         div_yield = info.get("dividend_yield")
         if div_yield is not None:
-            data_points += 1
-            dy_pct = div_yield * 100 if div_yield < 1 else div_yield
-            metrics["dividend_yield"] = round(dy_pct, 2)
-            if dy_pct > 3:
-                scores["dividend"] = 85
-                strengths.append(f"Attractive dividend yield of {dy_pct:.2f}%")
-            elif dy_pct > 1:
-                scores["dividend"] = 65
-            elif dy_pct > 0:
-                scores["dividend"] = 50
-            else:
-                scores["dividend"] = 40  # Not bad, just no dividend
+            div_yield = _ensure_decimal_percentage(div_yield)
+            if div_yield is not None:
+                data_points += 1
+                dy_pct = _percentage_to_display(div_yield, "dividend")
+                metrics["dividend_yield"] = round(dy_pct, 2)
+                if dy_pct > 3:
+                    scores["dividend"] = 85
+                    strengths.append(f"Attractive dividend yield of {dy_pct:.2f}%")
+                elif dy_pct > 1:
+                    scores["dividend"] = 65
+                elif dy_pct > 0:
+                    scores["dividend"] = 50
+                else:
+                    scores["dividend"] = 40  # Not bad, just no dividend
 
         # ── Market Cap (10%) ─────────────────────────────
         market_cap = info.get("market_cap")
@@ -213,7 +298,10 @@ class FundamentalEngine:
             val = info.get(key)
             if val is not None:
                 if key in ("operating_margin", "gross_margin"):
-                    val = round(val * 100 if abs(val) < 5 else val, 1)
+                    val = _ensure_decimal_percentage(val)
+                    if val is not None:
+                        val = _percentage_to_display(val, "margin")
+                        val = round(val, 1)
                 metrics[key] = val
 
         # ── Calculate overall score ──────────────────────

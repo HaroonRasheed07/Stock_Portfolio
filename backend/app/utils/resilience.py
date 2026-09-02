@@ -37,6 +37,11 @@ def classify_error(exc: Optional[BaseException] = None, message: str = "") -> st
         text = f"{type(exc).__name__}: {exc}"
 
     t = text.lower()
+    
+    # Check provider response validation failures FIRST (before generic empty check)
+    if "provider response" in t or "missing required fields" in t:
+        return ErrorCategory.RATE_LIMITED
+    
     if "429" in t or "too many requests" in t or "rate limit" in t:
         return ErrorCategory.RATE_LIMITED
     if "timeout" in t or "timed out" in t or "readtimeout" in t or "connecttimeout" in t:

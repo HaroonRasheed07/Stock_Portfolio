@@ -1,6 +1,14 @@
 """
 yfinance data provider implementation.
 Primary free data source for all market data, fundamentals, and news.
+
+RENDER/PRODUCTION HARDENING:
+- Detects empty/invalid provider responses
+- Validates response structure before parsing
+- Implements request timeout limits
+- Uses proper user-agent to avoid blocking
+- Logs actual failure modes for debugging
+- Fallback to stale cache on provider failure
 """
 import logging
 import asyncio
@@ -124,6 +132,52 @@ class YFinanceProvider(MarketDataProvider, FundamentalDataProvider, NewsProvider
         if symbol not in self._ticker_cache:
             self._ticker_cache[symbol] = yf.Ticker(symbol)
         return self._ticker_cache[symbol]
+
+    def _validate_info_response(self, info: Dict[str, Any], symbol: str) -> Tuple[bool, str]:
+        """
+        Validate that yfinance returned a real response, not an empty/error dict.
+
+        Returns (is_valid, error_message).
+
+        Detects:
+        - Empty dicts (provider timeout, 404, rate limit)
+        - Missing required fields (price, currency)
+        - HTML error responses (quoteType='N/A' with minimal fields)
+        - Completely unusable data
+        """
+        if not info or not isinstance(info, dict):
+            return False, "Provider returned empty or non-dict response"
+
+        # Check for minimal required fields
+        required = {"currency"}  # currency is almost always present in real responses
+        if not any(k in info for k in required):
+            return False, "Provider response missing required fields (likely empty/error response)"
+
+        # Check if the response looks like a real quote or an error
+        # Real quotes have at least one of these
+        data_fields = ["currentPrice", "regularMarketPrice", "navPrice", "lastPrice",
+                      "previousClose", "regularMarketPreviousClose",
+                      "marketCap", "regularMarketDayHigh", "bid", "ask"]
+        has_price_data = any(k in info and info[k] is not None for k in data_fields)
+
+        if not has_price_data:
+            # Check if it's an obvious error response
+            quote_type = info.get("quoteType", "").upper()
+            if quote_type == "N/A" or quote_type == "ERROR":
+                return False, f"Provider returned error response (quoteType={quote_type})"
+
+            # Log what we got for debugging Render issues
+            logger.warning(
+                f"DIAGNOSTIC [{symbol}] Response has data fields but no prices: "
+                f"info_keys={list(info.keys())[:10]}, "
+                f"quoteType={quote_type}, "
+                f"exchange={info.get('exchange', 'N/A')}"
+            )
+            # This might be a delisted stock or similar, which is NOT a provider error
+            # Return True but caller should handle no-price case
+            return True, ""
+
+        return True, ""
 
     async def _throttle(self):
         """Global concurrency-limited rate limiting via shared governor."""
@@ -399,6 +453,17 @@ class YFinanceProvider(MarketDataProvider, FundamentalDataProvider, NewsProvider
             def _fetch():
                 ticker = self._get_ticker(symbol)
                 info = ticker.info
+
+                # CRITICAL: Validate response before parsing
+                # This catches empty dicts, HTML error pages, rate limits, timeouts
+                is_valid, validation_error = self._validate_info_response(info, symbol)
+                if not is_valid:
+                    # Provider returned an error/empty response
+                    # Classify as rate_limited if it looks like a provider-level issue
+                    logger.warning(
+                        f"yfinance response invalid for {symbol}: {validation_error}"
+                    )
+                    raise RuntimeError(f"Provider response invalid: {validation_error}")
 
                 price = info.get("currentPrice") or info.get("regularMarketPrice") or \
                         info.get("navPrice", 0)
