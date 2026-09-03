@@ -214,33 +214,32 @@ class TestCompanyNameFallback:
         assert result.get("symbol") == "AAPL"
         assert not result.get("error")
 
-    def test_known_symbol_recovered_via_fresh_ticker(self):
-        """A FRESH yf.Ticker session returning full data recovers a previously
-        blocked cached ticker (the intermittent Render blocker)."""
+    def test_recovered_via_statements_fallback(self):
+        """When ticker.info is blocked/empty, _fill_from_statements recovers
+        fundamentals from fast_info + income_stmt + balance_sheet."""
+        import yfinance as yf
         provider = YFinanceProvider()
+        # Use real ticker for statements/fast_info, empty for info
+        real_ticker = yf.Ticker("NVDA")
         empty_ticker = MagicMock()
-        empty_ticker.info = {}
-        fresh_ticker = MagicMock()
-        fresh_ticker.info = {
-            "longName": "Alphabet Inc.",
-            "longBusinessSummary": "Alphabet is a technology company.",
-            "marketCap": 2_000_000_000_000,
-            "trailingPE": 28.5,
-            "trailingEps": 6.9,
-            "beta": 1.05,
-            "currency": "USD",
-        }
+        empty_ticker.info = {"longName": "NVIDIA Corporation", "currency": "USD"}
+        empty_ticker.get_info.return_value = {}
+        empty_ticker.fast_info = real_ticker.fast_info
+        empty_ticker.income_stmt = real_ticker.income_stmt
+        empty_ticker.balance_sheet = real_ticker.balance_sheet
+        empty_ticker.cashflow = real_ticker.cashflow
+        empty_ticker.funds_data = real_ticker.funds_data
 
         with patch.object(provider, "_get_ticker", return_value=empty_ticker), \
-             patch.object(yf, "Ticker", return_value=fresh_ticker):
-            result = asyncio.run(provider.get_stock_info("GOOGL"))
+             patch.object(yf, "Ticker", return_value=empty_ticker):
+            result = asyncio.run(provider.get_stock_info("NVDA"))
 
         assert result.get("status") == "success"
-        assert result.get("name") == "Alphabet Inc."
-        assert result.get("market_cap") == 2_000_000_000_000
-        assert result.get("pe_ratio") == 28.5
-        assert result.get("eps") == 6.9
-        assert result.get("beta") == 1.05
+        assert result.get("name") == "NVIDIA Corporation"
+        assert result.get("market_cap") is not None
+        assert result.get("pe_ratio") is not None
+        assert result.get("eps") is not None
+        assert result.get("revenue") is not None
 
     def test_unknown_symbol_still_returns_not_found(self):
         provider = YFinanceProvider()
