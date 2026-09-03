@@ -4,7 +4,13 @@ import { useEffect, useState, useRef, useCallback } from "react";
 import Link from "next/link";
 import { fetchAPI } from "@/lib/api";
 import { formatCurrency, formatPercent } from "@/lib/utils";
-import { Eye, Plus, Trash2, TrendingUp, AlertTriangle, RefreshCw } from "lucide-react";
+import { Plus, Trash2, AlertTriangle, RefreshCw, Search } from "lucide-react";
+
+interface Suggestion {
+  symbol: string;
+  name: string;
+  type: string;
+}
 
 export default function WatchlistPage() {
   const [watchlist, setWatchlist] = useState<any[]>([]);
@@ -14,6 +20,13 @@ export default function WatchlistPage() {
   const mountedRef = useRef(true);
   const abortRef = useRef<AbortController | null>(null);
   const requestIdRef = useRef(0);
+
+  const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
+  const [showDropdown, setShowDropdown] = useState(false);
+  const [searching, setSearching] = useState(false);
+  const [selectedIndex, setSelectedIndex] = useState(-1);
+  const debounceRef = useRef<NodeJS.Timeout | null>(null);
+  const containerRef = useRef<HTMLFormElement>(null);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -51,6 +64,74 @@ export default function WatchlistPage() {
 
   useEffect(() => { loadWatchlist(); }, [loadWatchlist]);
 
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setShowDropdown(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  useEffect(() => () => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+  }, []);
+
+  const skipSuggestions = useCallback((sym: string) => {
+    const upper = sym.toUpperCase();
+    return watchlist.some((w) => (w.symbol || "").toUpperCase() === upper);
+  }, [watchlist]);
+
+  const handleSearchInput = (value: string) => {
+    setSymbol(value);
+    setSelectedIndex(-1);
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+
+    const trimmed = value.trim();
+    if (trimmed.length >= 1) {
+      debounceRef.current = setTimeout(async () => {
+        setSearching(true);
+        try {
+          const data = await fetchAPI<Suggestion[]>(`/stocks/search?q=${encodeURIComponent(trimmed)}`);
+          const filtered = (data || []).filter((r) => !skipSuggestions(r.symbol));
+          setSuggestions(filtered);
+          setShowDropdown(true);
+        } catch {
+          setSuggestions([]);
+        } finally {
+          setSearching(false);
+        }
+      }, 300);
+    } else {
+      setSuggestions([]);
+      setShowDropdown(false);
+    }
+  };
+
+  const autoFill = (sym: string) => {
+    setSymbol(sym.toUpperCase());
+    setSuggestions([]);
+    setShowDropdown(false);
+    setSelectedIndex(-1);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (!showDropdown || suggestions.length === 0) return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setSelectedIndex((prev) => Math.min(prev + 1, suggestions.length - 1));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setSelectedIndex((prev) => Math.max(prev - 1, -1));
+    } else if (e.key === "Enter" && selectedIndex >= 0) {
+      e.preventDefault();
+      autoFill(suggestions[selectedIndex].symbol);
+    } else if (e.key === "Escape") {
+      setShowDropdown(false);
+    }
+  };
+
   const handleAdd = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!symbol) return;
@@ -83,15 +164,48 @@ export default function WatchlistPage() {
           <p className="text-xs text-slate-400 mt-1">Track prospective large-cap companies for investment timing</p>
         </div>
 
-        <form onSubmit={handleAdd} className="flex items-center space-x-2">
-          <input
-            type="text"
-            value={symbol}
-            onChange={(e) => setSymbol(e.target.value)}
-            placeholder="Add ticker (e.g. NVDA)..."
-            className="bg-[#121824] border border-[#1e293b] rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-sky-500/50"
-          />
-          <button type="submit" className="px-3 py-1.5 bg-sky-600 hover:bg-sky-500 text-white rounded-lg text-xs font-semibold flex items-center space-x-1">
+        <form onSubmit={handleAdd} className="relative flex items-center" ref={containerRef}>
+          <div className="relative">
+            <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
+            <input
+              type="text"
+              value={symbol}
+              onChange={(e) => handleSearchInput(e.target.value)}
+              onKeyDown={handleKeyDown}
+              onFocus={() => suggestions.length > 0 && setShowDropdown(true)}
+              placeholder="Add ticker (e.g. NVDA)..."
+              className="bg-[#121824] border border-[#1e293b] rounded-lg pl-9 pr-3 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-sky-500/50 w-56"
+              autoComplete="off"
+            />
+            {showDropdown && (suggestions.length > 0 || searching) && (
+              <div className="absolute top-full left-0 mt-1 w-72 bg-[#121824] border border-[#1e293b] rounded-lg shadow-xl overflow-hidden z-50 max-h-72 overflow-y-auto">
+                {searching && suggestions.length === 0 ? (
+                  <div className="p-3 text-xs text-slate-400 text-center">Searching...</div>
+                ) : (
+                  suggestions.map((r, idx) => (
+                    <button
+                      key={r.symbol}
+                      type="button"
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={() => autoFill(r.symbol)}
+                      className={`w-full px-4 py-3 text-left flex items-center justify-between hover:bg-sky-500/10 transition-colors ${
+                        idx === selectedIndex ? "bg-sky-500/10" : ""
+                      }`}
+                    >
+                      <div>
+                        <span className="font-bold text-sm text-sky-400">{r.symbol}</span>
+                        <span className="text-xs text-slate-400 ml-2">{r.name}</span>
+                      </div>
+                      <span className="text-[10px] text-slate-500 uppercase font-semibold">
+                        {r.type === "ETF" ? "ETF" : r.type === "EQUITY" ? "Stock" : r.type}
+                      </span>
+                    </button>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
+          <button type="submit" className="ml-2 px-3 py-1.5 bg-sky-600 hover:bg-sky-500 text-white rounded-lg text-xs font-semibold flex items-center space-x-1">
             <Plus className="w-3.5 h-3.5" />
             <span>Add</span>
           </button>
