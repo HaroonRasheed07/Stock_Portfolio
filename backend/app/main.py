@@ -164,6 +164,119 @@ async def _background_catalyst_polling():
     logger.info("Background catalyst polling stopped.")
 
 
+# ── Background company-info warming ─────────────────────
+_warmup_stop = asyncio.Event()
+_warmup_task = None
+
+
+async def _background_company_warming():
+    """Pre-fetch and cache company info for all known symbols.
+
+    Runs on startup (after 60s delay) and every 10 minutes.
+    Uses 3-second throttling between requests to avoid Yahoo 429.
+    Ensures every stock shows key metrics when the user opens it.
+    """
+    from app.providers.yfinance_provider import YFinanceProvider
+    from app.utils.cache import get_cached_stock_info, set_cached_stock_info
+    from app.utils.stock_directory import STOCK_DIRECTORY
+    from app.database import SessionLocal
+    from app.models.holding import Holding
+
+    # Wait before first cycle
+    logger.info("[Warmup] Company-info warming starting in 60s...")
+    try:
+        await asyncio.wait_for(_warmup_stop.wait(), timeout=60)
+        logger.info("[Warmup] Stopped during startup delay.")
+        return
+    except asyncio.TimeoutError:
+        pass
+
+    provider = YFinanceProvider()
+
+    while not _warmup_stop.is_set():
+        try:
+            # Collect all unique symbols
+            symbols = set()
+            # Portfolio holdings
+            try:
+                db = SessionLocal()
+                try:
+                    holdings = db.query(Holding).all()
+                    for h in holdings:
+                        if h.symbol:
+                            symbols.add(h.symbol.upper())
+                finally:
+                    db.close()
+            except Exception:
+                pass
+
+            # Stock directory
+            for sym in STOCK_DIRECTORY:
+                symbols.add(sym.upper())
+
+            if not symbols:
+                logger.info("[Warmup] No symbols to warm up.")
+            else:
+                logger.info(f"[Warmup] Warming company info for {len(symbols)} symbols...")
+                warmed = 0
+                skipped = 0
+                failed = 0
+
+                for sym in sorted(symbols):
+                    if _warmup_stop.is_set():
+                        break
+
+                    # Check if already cached with data
+                    cached = get_cached_stock_info(sym)
+                    if cached and cached.get("status") == "success":
+                        has_data = (
+                            cached.get("market_cap") or cached.get("pe_ratio")
+                            or cached.get("eps") or cached.get("description")
+                        )
+                        if has_data:
+                            skipped += 1
+                            continue
+
+                    # Fetch fresh
+                    try:
+                        result = await provider.get_stock_info(sym)
+                        if result.get("status") == "success":
+                            has_data = (
+                                result.get("market_cap") or result.get("pe_ratio")
+                                or result.get("eps") or result.get("description")
+                            )
+                            if has_data:
+                                set_cached_stock_info(sym, result)
+                                warmed += 1
+                            else:
+                                failed += 1
+                        else:
+                            failed += 1
+                    except Exception as e:
+                        logger.debug(f"[Warmup] {sym} failed: {e}")
+                        failed += 1
+
+                    # Throttle: 3 seconds between requests
+                    await asyncio.sleep(3)
+
+                logger.info(
+                    f"[Warmup] Cycle done: {warmed} warmed, "
+                    f"{skipped} already cached, {failed} failed"
+                )
+
+        except Exception as e:
+            logger.error(f"[Warmup] Background warming error: {e}", exc_info=True)
+
+        # Wait 10 minutes or stop
+        try:
+            await asyncio.wait_for(_warmup_stop.wait(), timeout=600)
+            break
+        except asyncio.TimeoutError:
+            pass
+
+    logger.info("[Warmup] Background company-info warming stopped.")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application startup and shutdown events."""
@@ -217,16 +330,28 @@ async def lifespan(app: FastAPI):
     _background_task = asyncio.create_task(_background_catalyst_polling())
     logger.info("Background catalyst polling task created.")
 
+    # Start background company-info warming
+    global _warmup_task
+    _warmup_stop.clear()
+    _warmup_task = asyncio.create_task(_background_company_warming())
+    logger.info("Background company-info warming task created.")
+
     yield
 
     # Shutdown
     logger.info("Application shutdown — stopping background tasks.")
     _stop_polling.set()
+    _warmup_stop.set()
     if _background_task:
         try:
             await asyncio.wait_for(_background_task, timeout=10)
         except (asyncio.TimeoutError, asyncio.CancelledError):
             _background_task.cancel()
+    if _warmup_task:
+        try:
+            await asyncio.wait_for(_warmup_task, timeout=10)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            _warmup_task.cancel()
     logger.info("Application shutdown complete.")
 
 

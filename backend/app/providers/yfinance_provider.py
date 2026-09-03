@@ -1202,6 +1202,39 @@ class YFinanceProvider(MarketDataProvider, FundamentalDataProvider, NewsProvider
         except Exception:
             logger.debug(f"[{symbol}] cashflow fallback failed", exc_info=True)
 
+        # ── Beta: calculate from price history (chart endpoint works on Render) ──
+        if not result.get("beta") and not is_etf:
+            try:
+                import numpy as np
+                stock_hist = ticker.history(period="6mo")
+                if stock_hist is not None and len(stock_hist) > 20:
+                    spy = yf.Ticker("SPY")
+                    spy_hist = spy.history(period="6mo")
+                    if spy_hist is not None and len(spy_hist) > 20:
+                        common = stock_hist.index.intersection(spy_hist.index)
+                        if len(common) > 20:
+                            s_ret = stock_hist.loc[common, "Close"].pct_change().dropna()
+                            m_ret = spy_hist.loc[common, "Close"].pct_change().dropna()
+                            if len(s_ret) > 20:
+                                cov = np.cov(s_ret.values, m_ret.values)[0][1]
+                                var = np.var(m_ret.values)
+                                if var > 0:
+                                    result["beta"] = round(float(cov / var), 2)
+            except Exception:
+                logger.debug(f"[{symbol}] beta calculation failed", exc_info=True)
+
+        # ── Dividend yield: from dividend history (chart endpoint works) ──
+        if not result.get("dividend_yield"):
+            try:
+                divs = ticker.dividends
+                if divs is not None and len(divs) > 0:
+                    recent = divs.iloc[-4:] if len(divs) >= 4 else divs
+                    annual_div = float(recent.sum())
+                    if annual_div > 0 and last_price and last_price > 0:
+                        result["dividend_yield"] = round(annual_div / last_price, 4)
+            except Exception:
+                logger.debug(f"[{symbol}] dividend yield fallback failed", exc_info=True)
+
         # ── ETF funds_data: description, total net assets, expense ratio ──
         is_etf = result.get("asset_type") == "ETF"
         if not is_etf:
