@@ -4,14 +4,26 @@ Stock service — handles individual stock data retrieval with caching.
 import logging
 import time
 import asyncio
+import json as _json
 import pandas as pd
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, Any, Optional, List
 from sqlalchemy.orm import Session
 
 from app.utils.cache import CacheManager
 from app.providers.yfinance_provider import get_yfinance_provider
 from app.services.ticker_service import get_ticker_service
+
+# Local stock database fallback
+_LOCAL_STOCK_DB: Dict[str, Dict[str, Any]] = {}
+try:
+    _db_path = Path(__file__).resolve().parent.parent / "utils" / "stock_data.json"
+    if _db_path.exists():
+        with open(_db_path, "r", encoding="utf-8") as _f:
+            _LOCAL_STOCK_DB = _json.load(_f)
+except Exception:
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -155,7 +167,38 @@ class StockService:
                 data["source"] = "live"
             return data
 
-        return await self._dedup(f"info:{canonical}", _fetch)
+        result = await self._dedup(f"info:{canonical}", _fetch)
+
+        # Last-resort fallback: local stock database when Yahoo is completely
+        # blocked or provider is unavailable. Guarantees every known stock
+        # shows at least name, description, and basic metrics.
+        if result and not result.get("error") and self._info_has_company_data(result):
+            return result
+        local = _LOCAL_STOCK_DB.get(canonical.upper())
+        if local:
+            fallback = {
+                "symbol": canonical,
+                "name": local.get("name", ""),
+                "sector": local.get("sector"),
+                "industry": local.get("industry"),
+                "market_cap": local.get("market_cap"),
+                "description": local.get("description"),
+                "currency": local.get("currency", "USD"),
+                "asset_type": local.get("asset_type", "EQUITY"),
+                "pe_ratio": local.get("pe_ratio"),
+                "forward_pe": local.get("forward_pe"),
+                "eps": local.get("eps"),
+                "dividend_yield": local.get("dividend_yield"),
+                "beta": local.get("beta"),
+                "profit_margin": local.get("profit_margin"),
+                "status": "success",
+                "source": "local_database",
+            }
+            if not result or result.get("error") or not self._info_has_company_data(result):
+                logger.info(f"[{canonical}] Using local stock database fallback")
+                self.cache.set_cached_stock_info(canonical, fallback)
+                return fallback
+        return result
 
     @staticmethod
     def _info_has_company_data(data: Dict[str, Any]) -> bool:

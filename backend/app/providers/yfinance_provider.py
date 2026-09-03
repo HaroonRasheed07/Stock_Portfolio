@@ -15,11 +15,23 @@ import asyncio
 import time
 import json as _json
 import os
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
+
+# ── Local stock database: descriptions + key metrics ──
+# Ships with the backend as fallback when Yahoo is blocked on Render.
+_LOCAL_STOCK_DB: Dict[str, Dict[str, Any]] = {}
+try:
+    _db_path = Path(__file__).resolve().parent.parent / "utils" / "stock_data.json"
+    if _db_path.exists():
+        with open(_db_path, "r", encoding="utf-8") as _f:
+            _LOCAL_STOCK_DB = _json.load(_f)
+except Exception:
+    pass
 
 # ── CRITICAL: Suppress noisy yfinance library logging ──
 # yfinance prints "possibly delisted", "429", "Expecting value" etc.
@@ -1374,6 +1386,33 @@ class YFinanceProvider(MarketDataProvider, FundamentalDataProvider, NewsProvider
                             logger.info(f"[{symbol}] Filled fundamentals from alternate endpoints (info was blocked)")
                     except Exception:
                         logger.debug(f"[{symbol}] statements fallback failed", exc_info=True)
+                # Layer 3: Merge from local stock database when Yahoo is blocked.
+                # This ensures every stock shows at least name, description, and
+                # basic metrics even when all Yahoo endpoints fail on Render.
+                local_data = _LOCAL_STOCK_DB.get(symbol.upper())
+                if local_data:
+                    _local_fields = {
+                        "name": local_data.get("name"),
+                        "description": local_data.get("description"),
+                        "market_cap": local_data.get("market_cap"),
+                        "pe_ratio": local_data.get("pe_ratio"),
+                        "forward_pe": local_data.get("forward_pe"),
+                        "eps": local_data.get("eps"),
+                        "dividend_yield": local_data.get("dividend_yield"),
+                        "beta": local_data.get("beta"),
+                        "profit_margin": local_data.get("profit_margin"),
+                        "sector": local_data.get("sector"),
+                        "industry": local_data.get("industry"),
+                        "currency": local_data.get("currency"),
+                        "asset_type": local_data.get("asset_type"),
+                    }
+                    filled = 0
+                    for field, val in _local_fields.items():
+                        if val is not None and not result.get(field):
+                            result[field] = val
+                            filled += 1
+                    if filled > 0:
+                        logger.info(f"[{symbol}] Merged {filled} fields from local stock database")
                 # ETF-specific fields
                 if info.get("quoteType") == "ETF" or info.get("legalType") == "Exchange Traded Fund":
                     result["etf_data"] = {
