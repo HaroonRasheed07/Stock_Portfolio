@@ -5,6 +5,7 @@ import pytest
 from app.utils.csv_parser import parse_csv_content, _clean_number
 from app.engines.technical import TechnicalEngine
 from app.engines.recommendation import RecommendationEngine
+from app.engines.fundamental import FundamentalEngine
 
 
 def test_clean_number():
@@ -43,3 +44,33 @@ def test_recommendation_engine():
     assert "positive_factors" in rec
     assert "negative_factors" in rec
     assert "what_would_change" in rec
+
+
+def test_fundamental_neutral_when_no_data():
+    """When Yahoo info is blocked (empty), the score should be a neutral 50,
+    NOT 0, so it is never mistaken for a poor-quality assessment."""
+    result = FundamentalEngine().analyze({})
+    assert result["score"] == 50
+    assert result["grade"] == "Insufficient Data"
+    assert "neutral" in result["explanation"].lower()
+
+
+def test_fundamental_neutral_when_too_few_metrics():
+    """Known company with only a name (Render fallback) but no live metrics
+    yields a neutral 50, named explicitly, not a misleading 0."""
+    result = FundamentalEngine().analyze({"symbol": "AAPL", "name": "Apple Inc."})
+    assert result["score"] == 50
+    assert result["grade"] == "Insufficient Data"
+    assert "Apple Inc." in result["explanation"]
+
+
+def test_fundamental_full_data_still_scores():
+    """Normal scoring must be unchanged when real metrics are available."""
+    full = {
+        "symbol": "AAPL", "name": "Apple Inc.",
+        "revenue_growth": 0.10, "pe_ratio": 37.3, "beta": 1.08,
+        "market_cap": 3.0e12, "eps": 8.71,
+    }
+    result = FundamentalEngine().analyze(full)
+    assert result["score"] >= 40
+    assert result["grade"] in ("Strong", "Healthy", "Mixed")

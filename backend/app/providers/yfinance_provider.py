@@ -48,6 +48,7 @@ from app.utils.resilience import (
     structured_failure,
 )
 from app.utils.request_tracer import get_request_tracer
+from app.utils.stock_directory import lookup_company_name
 
 logger = logging.getLogger(__name__)
 
@@ -1158,6 +1159,26 @@ class YFinanceProvider(MarketDataProvider, FundamentalDataProvider, NewsProvider
                         "ytd_return": info.get("ytdReturn"),
                         "morning_star_rating": info.get("morningStarOverallRating"),
                     }
+                # Production hardening (Render/datacenter IPs): Yahoo sometimes
+                # returns an empty quoteSummary for `info` even though the chart
+                # endpoint works. Retry once with a fresh info read, then fall
+                # back to the local company directory for the canonical name so
+                # well-known securities never surface as blank/not_found.
+                if not result.get("name") and not result.get("sector") and not result.get("description"):
+                    try:
+                        refreshed = ticker.get_info()
+                        if refreshed and any(refreshed.get(k) for k in ("longName", "shortName", "sector", "longBusinessSummary")):
+                            logger.info(f"[{symbol}] Yahoo info was empty; recovered via get_info() refresh")
+                            result["name"] = refreshed.get("longName") or refreshed.get("shortName") or result.get("name")
+                            result["sector"] = refreshed.get("sector") or result.get("sector")
+                            result["description"] = refreshed.get("longBusinessSummary") or result.get("description")
+                    except Exception:
+                        logger.debug(f"[{symbol}] get_info() refresh failed; using local directory", exc_info=True)
+                if not result.get("name"):
+                    dir_name = lookup_company_name(symbol)
+                    if dir_name:
+                        result["name"] = dir_name
+                        logger.info(f"[{symbol}] Yahoo info empty; used local stock-directory name: {dir_name}")
                 return result
 
             result = await self._retry_with_backoff(_fetch, max_retries=3)

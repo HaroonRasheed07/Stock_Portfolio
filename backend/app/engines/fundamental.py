@@ -86,12 +86,14 @@ class FundamentalEngine:
         Returns score (0-100), grade, strengths, weaknesses, and explanation.
         """
         if not info or info.get("error"):
+            name = (info or {}).get("name") or (info or {}).get("symbol") or "This security"
             return {
-                "score": 0,
+                "score": 50,
                 "grade": "Insufficient Data",
                 "strengths": [],
                 "weaknesses": [],
-                "explanation": "Fundamental data is unavailable for this security.",
+                "explanation": f"Fundamental data is unavailable for {name}. The score is shown as a neutral "
+                               "50 (unknown), not an assessment of quality.",
                 "metrics": {},
             }
 
@@ -306,12 +308,14 @@ class FundamentalEngine:
 
         # ── Calculate overall score ──────────────────────
         if data_points < 3:
+            name = info.get("name") or info.get("symbol") or "This company"
             return {
-                "score": 0,
+                "score": 50,
                 "grade": "Insufficient Data",
                 "strengths": strengths,
                 "weaknesses": weaknesses,
-                "explanation": "Too few fundamental metrics available for a reliable assessment.",
+                "explanation": f"Too few fundamental metrics are available for {name} to score reliably. "
+                               "The score is shown as a neutral 50 (unknown), not an assessment of quality.",
                 "metrics": metrics,
             }
 

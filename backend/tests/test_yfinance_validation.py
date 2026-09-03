@@ -4,6 +4,7 @@ Ensures empty/invalid responses are properly detected and classified.
 """
 import pytest
 import asyncio
+from unittest.mock import patch, MagicMock
 from app.providers.yfinance_provider import YFinanceProvider
 from app.utils.resilience import ErrorCategory, classify_error
 
@@ -187,3 +188,37 @@ class TestYFinanceProviderResilience:
         breaker.record_success()
         assert breaker.allow_request()
         assert breaker.state == "closed"
+
+
+class TestCompanyNameFallback:
+    """When Yahoo quoteSummary is blocked on datacenter IPs (Render), the
+    provider must still surface the canonical company name from the local
+    stock directory instead of returning a blank / not_found result."""
+
+    def test_known_symbol_falls_back_to_local_directory(self):
+        provider = YFinanceProvider()
+        # Simulate the Render condition: ticker.info is empty and get_info()
+        # also returns nothing. _get_ticker returns a mock.
+        fake_ticker = MagicMock()
+        fake_ticker.info = {}
+        fake_ticker.get_info.return_value = {}
+
+        with patch.object(provider, "_get_ticker", return_value=fake_ticker):
+            result = asyncio.run(provider.get_stock_info("AAPL"))
+
+        assert result.get("status") == "success"
+        assert result.get("name") == "Apple Inc."
+        assert result.get("symbol") == "AAPL"
+        assert not result.get("error")
+
+    def test_unknown_symbol_still_returns_not_found(self):
+        provider = YFinanceProvider()
+        fake_ticker = MagicMock()
+        fake_ticker.info = {}
+        fake_ticker.get_info.return_value = {}
+
+        with patch.object(provider, "_get_ticker", return_value=fake_ticker):
+            result = asyncio.run(provider.get_stock_info("ZZZQNOTREAL"))
+
+        # Not in the local directory and Yahoo is blocked -> not_found
+        assert result.get("status") == "not_found"
