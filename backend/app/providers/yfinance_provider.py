@@ -1064,6 +1064,186 @@ class YFinanceProvider(MarketDataProvider, FundamentalDataProvider, NewsProvider
                 return stale[0]
             return []
 
+    @staticmethod
+    def _fill_from_statements(ticker, result: Dict[str, Any]) -> Dict[str, Any]:
+        """Fill missing fundamentals from fast_info + income_stmt + balance_sheet.
+
+        These use different Yahoo endpoints (v7/quote, financial statements) that
+        are NOT subject to the same rate-limiting as the quoteSummary endpoint
+        blocked on datacenter IPs (Render). When ticker.info returns empty/partial,
+        this method recovers PE, EPS, market cap, margins, and other key metrics
+        from these more resilient endpoints.
+        """
+        if not result or result.get("error"):
+            return result
+        symbol = result.get("symbol", "")
+
+        # ── fast_info: v7/quote endpoint (always works on Render) ──
+        try:
+            fi = ticker.fast_info
+            if not result.get("market_cap"):
+                mc = getattr(fi, "market_cap", None)
+                if mc:
+                    result["market_cap"] = mc
+            for attr, key in [
+                ("year_high", "fifty_two_week_high"),
+                ("year_low", "fifty_two_week_low"),
+                ("fifty_day_average", "fifty_day_average"),
+                ("two_hundred_day_average", "two_hundred_day_average"),
+                ("last_volume", "avg_volume"),
+                ("shares", "shares_outstanding"),
+                ("exchange", "exchange"),
+            ]:
+                if not result.get(key):
+                    val = getattr(fi, attr, None)
+                    if val:
+                        result[key] = val
+        except Exception:
+            logger.debug(f"[{symbol}] fast_info fallback failed", exc_info=True)
+
+        last_price = None
+        try:
+            last_price = getattr(fi, "last_price", None)
+        except Exception:
+            pass
+
+        # ── income_stmt: revenue, EPS, margins ──
+        try:
+            inc = ticker.income_stmt
+            if inc is not None and not inc.empty:
+                latest = inc.iloc[:, 0]
+                if not result.get("eps"):
+                    eps = latest.get("Diluted EPS") or latest.get("Basic EPS")
+                    if eps is not None:
+                        result["eps"] = round(float(eps), 2)
+                if not result.get("revenue"):
+                    rev = latest.get("Total Revenue")
+                    if rev is not None:
+                        result["revenue"] = float(rev)
+                if not result.get("earnings"):
+                    ni = latest.get("Net Income") or latest.get("Net Income Common Stockholders")
+                    if ni is not None:
+                        result["earnings"] = float(ni)
+                ni = result.get("earnings")
+                rev = result.get("revenue")
+                if not result.get("profit_margin") and rev and ni and rev != 0:
+                    result["profit_margin"] = round(float(ni / rev), 4)
+                if not result.get("operating_margin"):
+                    oi = latest.get("Operating Income")
+                    if oi is not None and rev and rev != 0:
+                        result["operating_margin"] = round(float(oi / rev), 4)
+                if not result.get("gross_margin"):
+                    gp = latest.get("Gross Profit")
+                    if gp is not None and rev and rev != 0:
+                        result["gross_margin"] = round(float(gp / rev), 4)
+                # Revenue growth: compare latest vs prior year column
+                if not result.get("revenue_growth") and len(inc.columns) >= 2:
+                    cur_rev = latest.get("Total Revenue")
+                    prev_rev = inc.iloc[:, 1].get("Total Revenue")
+                    if cur_rev and prev_rev and prev_rev != 0:
+                        result["revenue_growth"] = round(float((cur_rev - prev_rev) / abs(prev_rev)), 4)
+        except Exception:
+            logger.debug(f"[{symbol}] income_stmt fallback failed", exc_info=True)
+
+        # ── Derive PE from price / EPS (both reliable sources) ──
+        if not result.get("pe_ratio") and result.get("eps") and result["eps"] > 0 and last_price:
+            result["pe_ratio"] = round(float(last_price / result["eps"]), 2)
+
+        # ── balance_sheet: equity, debt, ROE, D/E, current ratio ──
+        try:
+            bs = ticker.balance_sheet
+            if bs is not None and not bs.empty:
+                latest_bs = bs.iloc[:, 0]
+                equity = latest_bs.get("Stockholders Equity")
+                if not result.get("roe"):
+                    ni = result.get("earnings")
+                    if ni is not None and equity and equity > 0:
+                        result["roe"] = round(float(ni / equity), 4)
+                if not result.get("debt_to_equity"):
+                    debt = latest_bs.get("Total Debt")
+                    if debt is not None and equity and equity > 0:
+                        result["debt_to_equity"] = round(float(debt / equity * 100), 2)
+                if not result.get("current_ratio"):
+                    ca = latest_bs.get("Current Assets")
+                    cl = latest_bs.get("Current Liabilities")
+                    if ca is not None and cl and cl > 0:
+                        result["current_ratio"] = round(float(ca / cl), 2)
+                if not result.get("book_value"):
+                    shares = result.get("shares_outstanding")
+                    if equity and shares and shares > 0:
+                        result["book_value"] = round(float(equity / shares), 2)
+                if not result.get("total_debt"):
+                    debt = latest_bs.get("Total Debt")
+                    if debt is not None:
+                        result["total_debt"] = float(debt)
+                if not result.get("total_cash"):
+                    cash = latest_bs.get("Cash And Cash Equivalents")
+                    if cash is not None:
+                        result["total_cash"] = float(cash)
+                # Price-to-book from fast_info price / book_value
+                if not result.get("price_to_book") and result.get("book_value") and result["book_value"] > 0 and last_price:
+                    result["price_to_book"] = round(float(last_price / result["book_value"]), 2)
+        except Exception:
+            logger.debug(f"[{symbol}] balance_sheet fallback failed", exc_info=True)
+
+        # ── cashflow: free cash flow, operating cash flow ──
+        try:
+            cf = ticker.cashflow
+            if cf is not None and not cf.empty:
+                latest_cf = cf.iloc[:, 0]
+                if not result.get("free_cash_flow"):
+                    fcf = latest_cf.get("Free Cash Flow")
+                    if fcf is not None:
+                        result["free_cash_flow"] = float(fcf)
+                if not result.get("operating_cash_flow"):
+                    ocf = latest_cf.get("Operating Cash Flow")
+                    if ocf is not None:
+                        result["operating_cash_flow"] = float(ocf)
+        except Exception:
+            logger.debug(f"[{symbol}] cashflow fallback failed", exc_info=True)
+
+        # ── ETF funds_data: description, total net assets, expense ratio ──
+        is_etf = result.get("asset_type") == "ETF"
+        if not is_etf:
+            try:
+                if ticker.fast_info and getattr(ticker.fast_info, "quote_type", None) == "ETF":
+                    is_etf = True
+                    result["asset_type"] = "ETF"
+            except Exception:
+                pass
+        if is_etf and not result.get("description"):
+            try:
+                fd = ticker.funds_data
+                if fd:
+                    desc = getattr(fd, "description", None)
+                    if desc:
+                        result["description"] = desc
+                    overview = getattr(fd, "fund_overview", None)
+                    if overview and isinstance(overview, dict):
+                        result["etf_data"] = result.get("etf_data") or {}
+                        result["etf_data"]["category"] = overview.get("categoryName")
+                        result["etf_data"]["fund_family"] = overview.get("family")
+                    ops = getattr(fd, "fund_operations", None)
+                    if ops is not None and hasattr(ops, "iloc") and not ops.empty:
+                        try:
+                            qqq_col = ops.columns[0]
+                            total_na = ops.loc["Total Net Assets", qqq_col]
+                            if total_na and total_na > 0:
+                                result["market_cap"] = float(total_na) * 1_000_000
+                        except Exception:
+                            pass
+                        try:
+                            exp = ops.loc["Annual Report Expense Ratio", qqq_col]
+                            if exp is not None:
+                                result["etf_data"] = result.get("etf_data") or {}
+                                result["etf_data"]["expense_ratio"] = float(exp)
+                        except Exception:
+                            pass
+            except Exception:
+                logger.debug(f"[{symbol}] ETF funds_data fallback failed", exc_info=True)
+
+        return result
+
     # ── FundamentalDataProvider ──────────────────────────
 
     async def get_stock_info(self, symbol: str) -> Dict[str, Any]:
@@ -1185,6 +1365,18 @@ class YFinanceProvider(MarketDataProvider, FundamentalDataProvider, NewsProvider
                                 }
                     except Exception:
                         logger.debug(f"[{symbol}] fresh yf.Ticker retry failed", exc_info=True)
+                # Layer 3: When ticker.info is rate-limited/blocked, fill gaps
+                # from fast_info + income_stmt + balance_sheet. These use
+                # different Yahoo endpoints (v7/quote, financial statements)
+                # that are NOT subject to the same 429 throttle as quoteSummary.
+                # This recovers PE, EPS, market cap, margins, equity ratios.
+                if not result.get("market_cap") and not result.get("pe_ratio") and not result.get("eps"):
+                    try:
+                        self._fill_from_statements(ticker, result)
+                        if result.get("pe_ratio") or result.get("market_cap") or result.get("eps"):
+                            logger.info(f"[{symbol}] Filled fundamentals from financial statements (info was blocked)")
+                    except Exception:
+                        logger.debug(f"[{symbol}] statements fallback failed", exc_info=True)
                 # ETF-specific fields
                 if info.get("quoteType") == "ETF" or info.get("legalType") == "Exchange Traded Fund":
                     result["etf_data"] = {
