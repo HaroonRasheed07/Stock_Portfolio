@@ -5,6 +5,7 @@ Ensures empty/invalid responses are properly detected and classified.
 import pytest
 import asyncio
 from unittest.mock import patch, MagicMock
+import yfinance as yf
 from app.providers.yfinance_provider import YFinanceProvider
 from app.utils.resilience import ErrorCategory, classify_error
 
@@ -198,12 +199,14 @@ class TestCompanyNameFallback:
     def test_known_symbol_falls_back_to_local_directory(self):
         provider = YFinanceProvider()
         # Simulate the Render condition: ticker.info is empty and get_info()
-        # also returns nothing. _get_ticker returns a mock.
+        # also returns nothing. _get_ticker returns a mock (fresh yf.Ticker is
+        # patched to return the same empty mock).
         fake_ticker = MagicMock()
         fake_ticker.info = {}
         fake_ticker.get_info.return_value = {}
 
-        with patch.object(provider, "_get_ticker", return_value=fake_ticker):
+        with patch.object(provider, "_get_ticker", return_value=fake_ticker), \
+             patch.object(yf, "Ticker", return_value=fake_ticker):
             result = asyncio.run(provider.get_stock_info("AAPL"))
 
         assert result.get("status") == "success"
@@ -211,13 +214,42 @@ class TestCompanyNameFallback:
         assert result.get("symbol") == "AAPL"
         assert not result.get("error")
 
+    def test_known_symbol_recovered_via_fresh_ticker(self):
+        """A FRESH yf.Ticker session returning full data recovers a previously
+        blocked cached ticker (the intermittent Render blocker)."""
+        provider = YFinanceProvider()
+        empty_ticker = MagicMock()
+        empty_ticker.info = {}
+        fresh_ticker = MagicMock()
+        fresh_ticker.info = {
+            "longName": "Alphabet Inc.",
+            "longBusinessSummary": "Alphabet is a technology company.",
+            "marketCap": 2_000_000_000_000,
+            "trailingPE": 28.5,
+            "trailingEps": 6.9,
+            "beta": 1.05,
+            "currency": "USD",
+        }
+
+        with patch.object(provider, "_get_ticker", return_value=empty_ticker), \
+             patch.object(yf, "Ticker", return_value=fresh_ticker):
+            result = asyncio.run(provider.get_stock_info("GOOGL"))
+
+        assert result.get("status") == "success"
+        assert result.get("name") == "Alphabet Inc."
+        assert result.get("market_cap") == 2_000_000_000_000
+        assert result.get("pe_ratio") == 28.5
+        assert result.get("eps") == 6.9
+        assert result.get("beta") == 1.05
+
     def test_unknown_symbol_still_returns_not_found(self):
         provider = YFinanceProvider()
         fake_ticker = MagicMock()
         fake_ticker.info = {}
         fake_ticker.get_info.return_value = {}
 
-        with patch.object(provider, "_get_ticker", return_value=fake_ticker):
+        with patch.object(provider, "_get_ticker", return_value=fake_ticker), \
+             patch.object(yf, "Ticker", return_value=fake_ticker):
             result = asyncio.run(provider.get_stock_info("ZZZQNOTREAL"))
 
         # Not in the local directory and Yahoo is blocked -> not_found

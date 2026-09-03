@@ -1144,6 +1144,47 @@ class YFinanceProvider(MarketDataProvider, FundamentalDataProvider, NewsProvider
                     "float_shares": info.get("floatShares"),
                     "payout_ratio": info.get("payoutRatio"),
                 }
+                # Production hardening (Render/datacenter IPs): Yahoo's quoteSummary
+                # is intermittently blocked per-request. A cached Ticker may hold an
+                # empty/blocked response; retry once with a FRESH yf.Ticker (new
+                # session) which often bypasses the transient block and returns the
+                # full company data (description, key metrics, etc.).
+                if not result.get("name") and not result.get("market_cap") and not result.get("pe_ratio"):
+                    try:
+                        fresh = yf.Ticker(symbol)
+                        fresh_info = fresh.info
+                        if fresh_info and any(fresh_info.get(k) for k in
+                                              ("longName", "shortName", "longBusinessSummary",
+                                               "marketCap", "trailingPE", "totalRevenue")):
+                            logger.info(f"[{symbol}] Cached ticker info empty; recovered via fresh yf.Ticker session")
+                            info = fresh_info
+                            result["name"] = fresh_info.get("longName") or fresh_info.get("shortName") or result.get("name")
+                            result["description"] = fresh_info.get("longBusinessSummary") or result.get("description")
+                            for k, v in {
+                                "sector": "sector", "industry": "industry",
+                                "marketCap": "market_cap", "currency": "currency",
+                            }.items():
+                                if result.get(v) is None and fresh_info.get(k) is not None:
+                                    result[v] = fresh_info.get(k)
+                            for k, v in {
+                                "trailingPE": "pe_ratio", "forwardEps": "forward_eps",
+                                "trailingEps": "eps", "beta": "beta",
+                                "totalRevenue": "revenue", "dividendYield": "dividend_yield",
+                            }.items():
+                                if result.get(v) is None and fresh_info.get(k) is not None:
+                                    result[v] = fresh_info.get(k)
+                            result["exchange"] = fresh_info.get("exchange") or result.get("exchange")
+                            result["website"] = fresh_info.get("website") or result.get("website")
+                            result["country"] = fresh_info.get("country") or result.get("country")
+                            if not result.get("etf_data") and (
+                                    fresh_info.get("quoteType") == "ETF" or fresh_info.get("legalType") == "Exchange Traded Fund"):
+                                result["etf_data"] = {
+                                    "total_assets": fresh_info.get("netAssets"),
+                                    "expense_ratio": fresh_info.get("netExpenseRatio"),
+                                    "category": fresh_info.get("category"),
+                                }
+                    except Exception:
+                        logger.debug(f"[{symbol}] fresh yf.Ticker retry failed", exc_info=True)
                 # ETF-specific fields
                 if info.get("quoteType") == "ETF" or info.get("legalType") == "Exchange Traded Fund":
                     result["etf_data"] = {
