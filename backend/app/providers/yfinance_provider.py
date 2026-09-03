@@ -1369,12 +1369,17 @@ class YFinanceProvider(MarketDataProvider, FundamentalDataProvider, NewsProvider
                 # from fast_info + income_stmt + balance_sheet. These use
                 # different Yahoo endpoints (v7/quote, financial statements)
                 # that are NOT subject to the same 429 throttle as quoteSummary.
-                # This recovers PE, EPS, market cap, margins, equity ratios.
-                if not result.get("market_cap") and not result.get("pe_ratio") and not result.get("eps"):
+                # This recovers PE, EPS, market cap, margins, equity ratios,
+                # description, and ETF total net assets.
+                missing_fundamentals = (
+                    not result.get("market_cap") and not result.get("pe_ratio") and not result.get("eps")
+                )
+                missing_description = not result.get("description")
+                if missing_fundamentals or missing_description:
                     try:
                         self._fill_from_statements(ticker, result)
-                        if result.get("pe_ratio") or result.get("market_cap") or result.get("eps"):
-                            logger.info(f"[{symbol}] Filled fundamentals from financial statements (info was blocked)")
+                        if result.get("pe_ratio") or result.get("market_cap") or result.get("eps") or result.get("description"):
+                            logger.info(f"[{symbol}] Filled fundamentals from alternate endpoints (info was blocked)")
                     except Exception:
                         logger.debug(f"[{symbol}] statements fallback failed", exc_info=True)
                 # ETF-specific fields
