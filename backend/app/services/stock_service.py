@@ -136,16 +136,43 @@ class StockService:
         cached = self.cache.get_cached_stock_info(canonical)
         if cached:
             cached["source"] = "cache"
-            return cached
+            # A cached name-only entry (no description/metrics) is a stale partial
+            # response captured during an intermittent Yahoo block. Don't serve it
+            # as if complete — re-fetch so a recovered Yahoo can fill it in.
+            if self._info_has_company_data(cached):
+                return cached
 
         async def _fetch():
             data = await self.provider.get_stock_info(canonical)
             if data and not data.get("error"):
-                self.cache.set_cached_stock_info(canonical, data)
+                # Only cache genuinely useful company data. Yahoo intermittently
+                # returns a name-only (metrics/description empty) response on
+                # datacenter IPs. Caching that would pin a stock to "N/A" for the
+                # full TTL even after Yahoo recovers, so we serve it without caching
+                # and let a later complete fetch overwrite stale/full entries.
+                if self._info_has_company_data(data):
+                    self.cache.set_cached_stock_info(canonical, data)
                 data["source"] = "live"
             return data
 
         return await self._dedup(f"info:{canonical}", _fetch)
+
+    @staticmethod
+    def _info_has_company_data(data: Dict[str, Any]) -> bool:
+        """True when a stock-info result contains real company data worth caching.
+
+        A blocked/partial Yahoo response yields at most a name (from the local
+        directory fallback) but no description, market cap, valuation, or
+        earnings figures. We only cache results that include such content.
+        """
+        if not isinstance(data, dict):
+            return False
+        if data.get("description"):
+            return True
+        for key in ("market_cap", "pe_ratio", "eps", "revenue", "beta", "forward_pe"):
+            if data.get(key) not in (None, "", 0):
+                return True
+        return False
 
     async def get_stock_overview(self, symbol: str) -> Dict[str, Any]:
         """Get combined overview: info + price + fundamentals summary."""

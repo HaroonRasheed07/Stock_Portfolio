@@ -6,6 +6,7 @@ from app.utils.csv_parser import parse_csv_content, _clean_number
 from app.engines.technical import TechnicalEngine
 from app.engines.recommendation import RecommendationEngine
 from app.engines.fundamental import FundamentalEngine
+from app.services.stock_service import StockService
 
 
 def test_clean_number():
@@ -74,3 +75,14 @@ def test_fundamental_full_data_still_scores():
     result = FundamentalEngine().analyze(full)
     assert result["score"] >= 40
     assert result["grade"] in ("Strong", "Healthy", "Mixed")
+
+
+def test_stock_info_completeness_guard():
+    """A name-only (partial/blocked) stock-info result must NOT be cached as if
+    complete; only results with real company content are considered cachable."""
+    assert not StockService._info_has_company_data({})
+    assert not StockService._info_has_company_data({"name": "NVIDIA Corporation"})
+    assert not StockService._info_has_company_data({"name": "X", "pe_ratio": None, "eps": None})
+    assert StockService._info_has_company_data({"name": "X", "description": "A tech company."})
+    assert StockService._info_has_company_data({"name": "X", "market_cap": 2_000_000_000_000})
+    assert StockService._info_has_company_data({"name": "X", "eps": 8.71})
