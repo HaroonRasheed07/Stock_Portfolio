@@ -89,10 +89,25 @@ async def search_stocks(q: str = Query(..., min_length=1), db: Session = Depends
 # ── Named routes BEFORE the {symbol} catch-all ──────────
 @router.get("/trading-opportunities", response_model=APIResponse)
 @analytics_router.get("/trading-opportunities", response_model=APIResponse)
-async def get_trading_opportunities(refresh: bool = False, db: Session = Depends(get_db)):
-    """Get short-term swing trade setups for quality companies (cached 15 min; ?refresh=true rescans)."""
+async def get_trading_opportunities(
+    refresh: bool = False,
+    universe: str = "portfolio",
+    selected_symbols: str = "",
+    db: Session = Depends(get_db),
+):
+    """Get short-term swing trade setups for the specified universe.
+
+    Args:
+        universe: "portfolio" | "watchlist" | "portfolio_watchlist" | "selected"
+        selected_symbols: comma-separated tickers when universe="selected"
+    """
+    parsed_symbols = None
+    if universe == "selected" and selected_symbols:
+        parsed_symbols = [s.strip().upper() for s in selected_symbols.split(",") if s.strip()]
     service = AnalysisService(db)
-    result = await service.get_trading_opportunities(force=refresh)
+    result = await service.get_trading_opportunities(
+        force=refresh, universe=universe, selected_symbols=parsed_symbols,
+    )
     return APIResponse(data=result)
 
 
@@ -138,8 +153,8 @@ async def get_trading_diagnostics(db: Session = Depends(get_db)):
             "has_price": has_price,
         }
 
-    # Last scan result
-    last_scan = _get_cached_result("trading_opportunities")
+    # Last scan result (check portfolio cache key for backwards compat)
+    last_scan = _get_cached_result("trading_opportunities:portfolio") or _get_cached_result("trading_opportunities")
 
     return APIResponse(data={
         "circuit_breaker": breaker.snapshot(),
@@ -181,7 +196,7 @@ async def get_swap_recommendations(refresh: bool = False, db: Session = Depends(
     """Get portfolio stock-swap recommendations — identify weak holdings and suggest replacements."""
     service = AnalysisService(db)
     # Reuse trading scan result if cached (swap_recommendations are included)
-    trading = await service.get_trading_opportunities(force=refresh)
+    trading = await service.get_trading_opportunities(force=refresh, universe="portfolio")
     swaps = trading.get("swap_recommendations", [])
     return APIResponse(data={
         "recommendations": swaps,

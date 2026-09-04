@@ -8,6 +8,7 @@ import {
   CheckCircle, WifiOff, RefreshCw, Activity, Target, TrendingDown,
   BarChart3, Briefcase, ChevronDown, ChevronUp, AlertOctagon, Eye,
   ArrowUpDown, Star, Info, X, TrendingDown as TrendingDownIcon,
+  Search, Plus,
 } from "lucide-react";
 
 /* ── Helpers ──────────────────────────────────────────────────────── */
@@ -123,12 +124,25 @@ const actionBadge = (a: string) => {
 
 type Tab = "swing" | "longterm" | "swaps";
 type SwingFilter = "all" | "fresh" | "developing" | "watch" | "aging" | "invalidated";
+type Universe = "portfolio" | "watchlist" | "portfolio_watchlist" | "selected";
+
+const UNIVERSE_OPTIONS: { value: Universe; label: string }[] = [
+  { value: "portfolio", label: "Portfolio" },
+  { value: "watchlist", label: "Watchlist" },
+  { value: "portfolio_watchlist", label: "Portfolio + Watchlist" },
+  { value: "selected", label: "Selected Stocks" },
+];
 
 /* ── Page ─────────────────────────────────────────────────────────── */
 
 export default function TradingPage() {
   const [tab, setTab] = useState<Tab>("swing");
   const [swingFilter, setSwingFilter] = useState<SwingFilter>("all");
+  const [universe, setUniverse] = useState<Universe>("portfolio");
+  const [selectedSymbols, setSelectedSymbols] = useState<string[]>([]);
+  const [tickerInput, setTickerInput] = useState("");
+  const [tickerSearchResults, setTickerSearchResults] = useState<any[]>([]);
+  const [tickerSearching, setTickerSearching] = useState(false);
   const [swingOpps, setSwingOpps] = useState<any[]>([]);
   const [nearMisses, setNearMisses] = useState<any[]>([]);
   const [swapRecs, setSwapRecs] = useState<any[]>([]);
@@ -142,6 +156,29 @@ export default function TradingPage() {
   const mountedRef = useRef(true);
   const abortRef = useRef<AbortController | null>(null);
   const requestIdRef = useRef(0);
+  const tickerSearchTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Persist universe preference in localStorage
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem("trading_universe");
+      if (saved && UNIVERSE_OPTIONS.some(o => o.value === saved)) {
+        setUniverse(saved as Universe);
+      }
+      const savedSelected = localStorage.getItem("trading_selected_symbols");
+      if (savedSelected) {
+        setSelectedSymbols(JSON.parse(savedSelected));
+      }
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    try { localStorage.setItem("trading_universe", universe); } catch {}
+  }, [universe]);
+
+  useEffect(() => {
+    try { localStorage.setItem("trading_selected_symbols", JSON.stringify(selectedSymbols)); } catch {}
+  }, [selectedSymbols]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -159,7 +196,12 @@ export default function TradingPage() {
     if (refresh) setRescanning(true); else setLoading(true);
     setError(null);
     try {
-      const result = await fetchAPI<any>(`/analytics/trading-opportunities${refresh ? "?refresh=true" : ""}`);
+      let url = `/analytics/trading-opportunities?universe=${universe}`;
+      if (universe === "selected" && selectedSymbols.length > 0) {
+        url += `&selected_symbols=${selectedSymbols.join(",")}`;
+      }
+      if (refresh) url += `${url.includes("?") ? "&" : "?"}refresh=true`;
+      const result = await fetchAPI<any>(url);
       if (!mountedRef.current || controller.signal.aborted || reqId !== requestIdRef.current) return;
       const opps = result?.opportunities || (Array.isArray(result) ? result : []);
       setSwingOpps(opps);
@@ -176,7 +218,7 @@ export default function TradingPage() {
     } finally {
       if (mountedRef.current && !controller.signal.aborted) { setLoading(false); setRescanning(false); }
     }
-  }, []);
+  }, [universe, selectedSymbols]);
 
   const loadLongTerm = useCallback(async () => {
     try {
@@ -188,6 +230,64 @@ export default function TradingPage() {
   }, []);
 
   useEffect(() => { loadSwing(); loadLongTerm(); }, []);
+
+  // Re-fetch when universe changes (debounced)
+  useEffect(() => {
+    if (universe !== "selected" || selectedSymbols.length > 0) {
+      const t = setTimeout(() => loadSwing(), 300);
+      return () => clearTimeout(t);
+    }
+  }, [universe]);
+
+  // Re-fetch when selected symbols change
+  useEffect(() => {
+    if (universe === "selected" && selectedSymbols.length > 0) {
+      const t = setTimeout(() => loadSwing(), 500);
+      return () => clearTimeout(t);
+    }
+  }, [selectedSymbols]);
+
+  /* ── Ticker Search / Selected Stocks ────────────────────────── */
+
+  const searchTicker = useCallback(async (q: string) => {
+    if (!q || q.length < 1) { setTickerSearchResults([]); return; }
+    setTickerSearching(true);
+    try {
+      const results = await fetchAPI<any[]>(`/stocks/search?q=${encodeURIComponent(q)}`);
+      if (!mountedRef.current) return;
+      setTickerSearchResults(results || []);
+    } catch {
+      setTickerSearchResults([]);
+    } finally {
+      if (mountedRef.current) setTickerSearching(false);
+    }
+  }, []);
+
+  const handleTickerInput = useCallback((val: string) => {
+    setTickerInput(val);
+    if (tickerSearchTimeout.current) clearTimeout(tickerSearchTimeout.current);
+    tickerSearchTimeout.current = setTimeout(() => searchTicker(val), 250);
+  }, [searchTicker]);
+
+  const addSymbol = useCallback((sym: string) => {
+    const normalized = sym.toUpperCase().trim();
+    if (!normalized || selectedSymbols.includes(normalized)) return;
+    setSelectedSymbols(prev => [...prev, normalized]);
+    setTickerInput("");
+    setTickerSearchResults([]);
+  }, [selectedSymbols]);
+
+  const removeSymbol = useCallback((sym: string) => {
+    setSelectedSymbols(prev => prev.filter(s => s !== sym));
+  }, []);
+
+  const handleTickerKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      const val = tickerInput.toUpperCase().trim();
+      if (val) addSymbol(val);
+    }
+  }, [tickerInput, addSymbol]);
 
   /* ── Derived State ────────────────────────────────────────────── */
 
@@ -244,8 +344,84 @@ export default function TradingPage() {
             Trading Opportunities
           </h1>
           <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 max-w-2xl">
-            Technical setups across your portfolio, ranked by setup quality, trend confirmation, momentum, risk and freshness.
+            Technical setups {universe === "portfolio" ? "across your portfolio" : universe === "watchlist" ? "from your watchlist" : universe === "portfolio_watchlist" ? "across portfolio and watchlist" : "for selected stocks"}, ranked by setup quality, trend confirmation, momentum, risk and freshness.
           </p>
+
+          {/* ═══ SCAN UNIVERSE SELECTOR ══════════════════════════ */}
+          <div className="flex items-center gap-3 mt-3 flex-wrap">
+            <div className="relative">
+              <label className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1 block">Scan Universe</label>
+              <div className="relative">
+                <select
+                  value={universe}
+                  onChange={(e) => setUniverse(e.target.value as Universe)}
+                  className="appearance-none bg-white dark:bg-[#121824] border border-slate-200 dark:border-[#1e293b] rounded-lg px-3 py-1.5 pr-8 text-xs font-semibold text-slate-700 dark:text-slate-300 cursor-pointer hover:border-sky-500/50 transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500/30"
+                >
+                  {UNIVERSE_OPTIONS.map(o => (
+                    <option key={o.value} value={o.value}>{o.label}</option>
+                  ))}
+                </select>
+                <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-slate-400 pointer-events-none" />
+              </div>
+            </div>
+            {swingData?.scanned_count != null && (
+              <span className="text-[11px] text-slate-500 mt-4">
+                <strong className="text-slate-700 dark:text-slate-300">{swingData.scanned_count}</strong> stocks scanned
+              </span>
+            )}
+          </div>
+
+          {/* ═══ SELECTED STOCKS INPUT ══════════════════════════ */}
+          {universe === "selected" && (
+            <div className="mt-3 p-3 bg-white dark:bg-[#121824] border border-slate-200 dark:border-[#1e293b] rounded-xl">
+              <label className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-2 block">Selected Stocks</label>
+              <div className="relative mb-2">
+                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
+                <input
+                  type="text"
+                  value={tickerInput}
+                  onChange={(e) => handleTickerInput(e.target.value)}
+                  onKeyDown={handleTickerKeyDown}
+                  placeholder="Search ticker... (e.g. AAPL, NVDA)"
+                  className="w-full pl-8 pr-3 py-1.5 bg-slate-50 dark:bg-slate-800/40 border border-slate-200 dark:border-[#1e293b] rounded-lg text-xs text-slate-700 dark:text-slate-300 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-sky-500/30"
+                />
+                {tickerSearching && (
+                  <span className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] text-slate-400">Searching...</span>
+                )}
+              </div>
+              {/* Ticker search results dropdown */}
+              {tickerSearchResults.length > 0 && (
+                <div className="mb-2 max-h-40 overflow-y-auto border border-slate-200 dark:border-[#1e293b] rounded-lg">
+                  {tickerSearchResults.slice(0, 6).map((r: any) => (
+                    <button
+                      key={r.symbol}
+                      onClick={() => addSymbol(r.symbol)}
+                      disabled={selectedSymbols.includes(r.symbol)}
+                      className="w-full flex items-center justify-between px-3 py-1.5 text-xs hover:bg-slate-50 dark:hover:bg-slate-800/40 transition-colors disabled:opacity-40 text-left"
+                    >
+                      <span className="font-bold text-slate-700 dark:text-slate-200">{r.symbol}</span>
+                      <span className="text-slate-500 truncate ml-2">{r.name}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+              {/* Selected ticker chips */}
+              {selectedSymbols.length > 0 ? (
+                <div className="flex flex-wrap gap-1.5">
+                  {selectedSymbols.map(sym => (
+                    <span key={sym} className="flex items-center gap-1 px-2 py-1 bg-sky-500/10 text-sky-600 dark:text-sky-400 border border-sky-500/20 rounded-lg text-[11px] font-semibold">
+                      {sym}
+                      <button onClick={() => removeSymbol(sym)} className="ml-0.5 hover:text-rose-500 transition-colors">
+                        <X className="w-3 h-3" />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-[10px] text-slate-400">Enter ticker symbols to scan. Press Enter or click to add.</p>
+              )}
+            </div>
+          )}
           <div className="flex items-center gap-3 mt-2 flex-wrap text-[11px]">
             <span className={`flex items-center gap-1.5 px-2 py-0.5 rounded font-semibold border ${
               market.open
@@ -504,6 +680,21 @@ export default function TradingPage() {
                         <p className="text-xs text-slate-500">
                           {op.name} {op.sector && op.sector !== "Unknown" ? `· ${op.sector}` : ""}
                         </p>
+                        {/* Source + Potential New Position */}
+                        {universe !== "portfolio" && (
+                          <div className="flex items-center gap-1.5 mt-0.5">
+                            {op.source && (
+                              <span className="px-1.5 py-0.5 text-[9px] font-semibold bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 rounded border border-slate-200 dark:border-[#1e293b]">
+                                {op.source}
+                              </span>
+                            )}
+                            {!op.is_portfolio_holding && (
+                              <span className="px-1.5 py-0.5 text-[9px] font-bold bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 rounded border border-emerald-500/20">
+                                Potential New Position
+                              </span>
+                            )}
+                          </div>
+                        )}
                       </div>
                     </div>
                     <div className="flex items-center gap-2 flex-wrap">

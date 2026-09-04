@@ -63,6 +63,108 @@ class AnalysisService:
         self.ml_engine = MLEngine()
         self.rule_ai = RuleBasedAI()
 
+    def _resolve_scan_symbols(self, universe: str, selected_symbols: Optional[List[str]] = None
+                               ) -> tuple:
+        """Resolve which symbols to scan based on universe mode.
+
+        Returns:
+            (symbols_to_scan, portfolio_symbols)
+            symbols_to_scan: list of dicts with at least 'symbol', 'name', 'sector' keys
+            portfolio_symbols: set of symbols that are in the portfolio
+        """
+        from app.models.watchlist import WatchlistItem
+        from app.services.ticker_service import get_ticker_service
+
+        ticker_svc = get_ticker_service()
+        portfolio_symbols = set()
+
+        if universe == "portfolio":
+            holdings = self.portfolio_service.get_holdings()
+            portfolio_symbols = {h["symbol"] for h in holdings}
+            return holdings, portfolio_symbols
+
+        elif universe == "watchlist":
+            items = self.db.query(WatchlistItem).all()
+            symbols = []
+            for item in items:
+                normalized = ticker_svc.normalize(item.symbol)
+                if not normalized:
+                    normalized = item.symbol.upper()
+                symbols.append({
+                    "symbol": normalized,
+                    "name": item.name,
+                    "sector": None,
+                    "current_price": None,
+                    "current_value": None,
+                    "quantity": None,
+                    "avg_price": None,
+                    "allocation_pct": 0,
+                    "unrealized_gain_pct": None,
+                })
+            return symbols, portfolio_symbols
+
+        elif universe == "portfolio_watchlist":
+            holdings = self.portfolio_service.get_holdings()
+            portfolio_symbols = {h["symbol"] for h in holdings}
+            items = self.db.query(WatchlistItem).all()
+            watchlist_map = {}
+            for item in items:
+                normalized = ticker_svc.normalize(item.symbol)
+                if not normalized:
+                    normalized = item.symbol.upper()
+                watchlist_map[normalized] = {
+                    "symbol": normalized,
+                    "name": item.name,
+                    "sector": None,
+                    "current_price": None,
+                    "current_value": None,
+                    "quantity": None,
+                    "avg_price": None,
+                    "allocation_pct": 0,
+                    "unrealized_gain_pct": None,
+                }
+            # Merge: portfolio holdings take precedence (they have richer data)
+            seen = set()
+            merged = []
+            for h in holdings:
+                merged.append(h)
+                seen.add(h["symbol"])
+            for sym, wdata in watchlist_map.items():
+                if sym not in seen:
+                    merged.append(wdata)
+                    seen.add(sym)
+            return merged, portfolio_symbols
+
+        elif universe == "selected":
+            validated = []
+            seen = set()
+            for sym in (selected_symbols or []):
+                normalized = ticker_svc.normalize(sym)
+                if not normalized:
+                    normalized = sym.upper().strip()
+                if not normalized or len(normalized) > 10:
+                    continue
+                if normalized in seen:
+                    continue
+                seen.add(normalized)
+                validated.append({
+                    "symbol": normalized,
+                    "name": None,
+                    "sector": None,
+                    "current_price": None,
+                    "current_value": None,
+                    "quantity": None,
+                    "avg_price": None,
+                    "allocation_pct": 0,
+                    "unrealized_gain_pct": None,
+                })
+            return validated, portfolio_symbols
+
+        # Default: portfolio
+        holdings = self.portfolio_service.get_holdings()
+        portfolio_symbols = {h["symbol"] for h in holdings}
+        return holdings, portfolio_symbols
+
     def _get_user_risk_profile(self) -> str:
         """Get the active user's risk profile preference."""
         settings = self.db.query(UserSettings).first()
@@ -249,14 +351,17 @@ class AnalysisService:
         _set_cached_result("portfolio_health", report)
         return report
 
-    async def get_trading_opportunities(self, force: bool = False) -> Dict[str, Any]:
+    async def get_trading_opportunities(self, force: bool = False, universe: str = "portfolio",
+                                         selected_symbols: Optional[List[str]] = None) -> Dict[str, Any]:
         """
-        Identify swing setups among established holdings.
+        Identify swing setups among the specified universe.
         Uses request coalescing: if scan A is running, scan B awaits A's result.
         Returns { opportunities: [...], data_status: ... }.
         Results cached 15 minutes.
         """
-        cache_key = "trading_opportunities"
+        cache_key = f"trading_opportunities:{universe}"
+        if universe == "selected" and selected_symbols:
+            cache_key += f":{','.join(sorted(selected_symbols))}"
         if not force:
             cached = _get_cached_result(cache_key)
             if cached is not None:
@@ -275,7 +380,11 @@ class AnalysisService:
         fut = loop.create_future()
         _inflight_scans[cache_key] = fut
         try:
-            result = await self._do_trading_scan()
+            # Resolve scan symbols based on universe mode
+            symbols_to_scan, portfolio_symbols = self._resolve_scan_symbols(
+                universe, selected_symbols
+            )
+            result = await self._do_trading_scan(symbols_to_scan, portfolio_symbols, universe)
             if not fut.done():
                 fut.set_result(result)
             # Cache result even if stale — it's still better than nothing
@@ -288,7 +397,9 @@ class AnalysisService:
         finally:
             _inflight_scans.pop(cache_key, None)
 
-    async def _do_trading_scan(self) -> Dict[str, Any]:
+    async def _do_trading_scan(self, symbols_to_scan: Optional[List[Dict]] = None,
+                                portfolio_symbols: Optional[set] = None,
+                                universe: str = "portfolio") -> Dict[str, Any]:
         """Actual trading opportunities scan logic (runs at most once per 15 min).
         
         CRITICAL RESILIENCE:
@@ -305,12 +416,18 @@ class AnalysisService:
         MAX_SCAN_SECONDS = 120
 
         # ── STAGE 1: Holdings + Eligibility ─────────────────────
-        holdings = self.portfolio_service.get_holdings()
+        if symbols_to_scan is not None:
+            all_holdings = symbols_to_scan
+        else:
+            all_holdings = self.portfolio_service.get_holdings()
+        if portfolio_symbols is None:
+            portfolio_symbols = {h["symbol"] for h in all_holdings}
+
         eligible = []
         excluded_reasons = {}
-        for h in holdings:
+        for h in all_holdings:
             price = h.get("current_price") or h.get("avg_price") or 0
-            if price >= 5.0:
+            if price and price >= 5.0:
                 eligible.append(h)
             elif h.get("current_value") and h.get("quantity"):
                 try:
@@ -321,6 +438,10 @@ class AnalysisService:
                         excluded_reasons[h["symbol"]] = f"derived_price={derived:.2f}"
                 except (TypeError, ZeroDivisionError) as e:
                     excluded_reasons[h["symbol"]] = f"calc_error={e}"
+            elif universe in ("watchlist", "selected", "portfolio_watchlist"):
+                # For non-portfolio universes, include symbols without price data
+                # (price filter happens after historical data is fetched)
+                eligible.append(h)
             else:
                 excluded_reasons[h["symbol"]] = (
                     f"price={price} value={h.get('current_value')} qty={h.get('quantity')}"
@@ -328,7 +449,7 @@ class AnalysisService:
         symbols = [h["symbol"] for h in eligible]
 
         logger.info(
-            f"TRADING_SCAN_START: holdings={len(holdings)} eligible={len(eligible)} "
+            f"TRADING_SCAN_START: holdings={len(all_holdings)} eligible={len(eligible)} "
             f"excluded={len(excluded_reasons)} "
             f"symbols={','.join(symbols[:10])}{'...' if len(symbols) > 10 else ''}"
         )
@@ -698,6 +819,20 @@ class AnalysisService:
             elif r is not None:
                 opportunities.append(r)
 
+        # ── Add source labels + is_portfolio_holding ──────────────
+        for opp in opportunities:
+            sym = opp["symbol"]
+            is_portfolio = sym in portfolio_symbols
+            opp["is_portfolio_holding"] = is_portfolio
+            if universe == "selected":
+                opp["source"] = "Selected"
+            elif universe == "watchlist":
+                opp["source"] = "Watchlist"
+            elif universe == "portfolio_watchlist":
+                opp["source"] = "Portfolio + Watchlist" if is_portfolio else "Watchlist"
+            else:
+                opp["source"] = "Portfolio"
+
         scan_duration = time.time() - scan_start
         logger.info(
             f"Trading scan complete: {len(opportunities)} opportunities from "
@@ -744,8 +879,10 @@ class AnalysisService:
         near_misses.sort(key=lambda x: x["score"], reverse=True)
         near_misses = near_misses[:5]
 
-        # ── Portfolio swap recommendations ───────────────────────
-        swap_recommendations = self._generate_swap_recommendations(holdings, hist_rows)
+        # ── Portfolio swap recommendations (only when scanning portfolio) ──
+        swap_recommendations = []
+        if universe == "portfolio":
+            swap_recommendations = self._generate_swap_recommendations(all_holdings, hist_rows)
 
         # ── Rank and cap ────────────────────────────────────
         opportunities.sort(key=lambda x: x.get("rank_score", 0), reverse=True)
@@ -773,10 +910,12 @@ class AnalysisService:
             "opportunities": opportunities,
             "near_misses": near_misses,
             "swap_recommendations": swap_recommendations,
+            "universe": universe,
+            "scanned_count": len(all_holdings),
             "data_status": data_status,
             "data_source": data_source,
             "data_quality": {
-                "total_holdings": len(holdings),
+                "total_holdings": len(all_holdings),
                 "eligible_holdings": total_eligible,
                 "holdings_with_data": symbols_with_data,
                 "failed_symbols": symbols_failed,
@@ -790,7 +929,6 @@ class AnalysisService:
                 "stale_age": stale_age,
             },
         }
-        _set_cached_result("trading_opportunities", result)
         return result
 
     def _classify_maturity(self, technical, signals, trend, setup) -> str:

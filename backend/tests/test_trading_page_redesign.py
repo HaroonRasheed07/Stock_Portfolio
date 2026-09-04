@@ -563,3 +563,316 @@ class TestPortfolioContext:
             if pc:
                 assert "allocation_pct" in pc
                 assert "unrealized_gain_pct" in pc
+
+
+# ════════════════════════════════════════════════════════════════════
+# UNIVERSE MODE TESTS
+# ════════════════════════════════════════════════════════════════════
+
+class TestUniverseModes:
+    """Tests for scan universe selection: portfolio, watchlist, both, selected.
+    Mocks the scan at the service level to avoid slow Yahoo network calls."""
+
+    def _make_opportunity(self, source="Portfolio", is_portfolio=True):
+        return {
+            "symbol": "AAPL", "company_name": "Apple Inc.",
+            "setup_type": "Bull Flag", "signal_strength": "Strong",
+            "entry_price": 190.0, "stop_loss": 185.0, "target_1": 200.0,
+            "risk_reward": 2.0, "technical_score": 75,
+            "news_sentiment": 0.3, "news_summary": "Positive",
+            "source": source, "is_portfolio_holding": is_portfolio,
+            "confirmation_factors": [], "red_flags": [],
+            "news_freshness_days": 1, "overall_confidence": "Medium",
+            "pattern": "Bullish", "entry_status": "Near entry",
+            "price_context": {"current_price": 190.0, "day_change_pct": 1.0},
+            "news_context": {}, "portfolio_context": {},
+            "technical_breakdown": {},
+        }
+
+    def _make_result(self, opps=None, scanned_count=1, universe="portfolio"):
+        return {
+            "opportunities": opps if opps is not None else [self._make_opportunity()],
+            "near_misses": [], "swap_recommendations": [],
+            "universe": universe,
+            "scanned_count": scanned_count,
+            "data_quality": {
+                "total_holdings": 3, "eligible_holdings": 3,
+                "holdings_with_data": 3, "candidates_found": 1,
+                "opportunities_found": len(opps) if opps is not None else 1,
+                "scan_duration_seconds": 0.5,
+            },
+            "data_status": "success",
+        }
+
+    def test_portfolio_universe_default(self):
+        from app.main import app
+        from fastapi.testclient import TestClient
+        from unittest.mock import patch
+        async def mock_scan(*args, **kwargs):
+            assert kwargs.get("universe") == "portfolio" or (len(args) >= 3 and args[2] == "portfolio")
+            return {"universe": "portfolio", "opportunities": [], "near_misses": [],
+                    "swap_recommendations": [], "scanned_count": 0,
+                    "data_quality": {"total_holdings": 3, "eligible_holdings": 3,
+                                     "holdings_with_data": 3, "candidates_found": 0,
+                                     "opportunities_found": 0, "scan_duration_seconds": 0.1},
+                    "data_status": "success"}
+        with patch("app.services.analysis_service.AnalysisService._do_trading_scan", side_effect=mock_scan):
+            client = TestClient(app)
+            r = client.get("/analytics/trading-opportunities?universe=portfolio&refresh=true")
+        assert r.status_code == 200
+        data = r.json().get("data", {})
+        assert data.get("universe") == "portfolio"
+
+    def test_watchlist_universe(self):
+        from app.main import app
+        from fastapi.testclient import TestClient
+        from unittest.mock import patch
+        captured = {}
+        async def mock_scan(*args, **kwargs):
+            universe = kwargs.get("universe") or (args[2] if len(args) >= 3 else "portfolio")
+            captured["universe"] = universe
+            return {"universe": universe, "opportunities": [
+                {"symbol": "GOOGL", "source": "Watchlist", "is_portfolio_holding": False,
+                 "company_name": "Alphabet", "setup_type": "Bull Flag",
+                 "signal_strength": "Strong", "entry_price": 140.0, "stop_loss": 135.0,
+                 "target_1": 150.0, "risk_reward": 2.0, "technical_score": 75,
+                 "news_sentiment": 0.3, "news_summary": "Positive",
+                 "confirmation_factors": [], "red_flags": [],
+                 "news_freshness_days": 1, "overall_confidence": "Medium",
+                 "pattern": "Bullish", "entry_status": "Near entry",
+                 "price_context": {"current_price": 140.0, "day_change_pct": 1.0},
+                 "news_context": {}, "portfolio_context": {},
+                 "technical_breakdown": {}}],
+                "near_misses": [], "swap_recommendations": [],
+                "scanned_count": 1,
+                "data_quality": {"total_holdings": 1, "eligible_holdings": 1,
+                                 "holdings_with_data": 1, "candidates_found": 1,
+                                 "opportunities_found": 1, "scan_duration_seconds": 0.1},
+                "data_status": "success"}
+        with patch("app.services.analysis_service.AnalysisService._do_trading_scan", side_effect=mock_scan):
+            client = TestClient(app)
+            r = client.get("/analytics/trading-opportunities?universe=watchlist&refresh=true")
+        assert r.status_code == 200
+        assert captured["universe"] == "watchlist"
+        data = r.json().get("data", {})
+        for opp in data.get("opportunities", []):
+            assert opp.get("source") == "Watchlist"
+            assert opp.get("is_portfolio_holding") is False
+
+    def test_portfolio_watchlist_universe(self):
+        from app.main import app
+        from fastapi.testclient import TestClient
+        from unittest.mock import patch
+        captured = {}
+        async def mock_scan(*args, **kwargs):
+            universe = kwargs.get("universe") or (args[2] if len(args) >= 3 else "portfolio")
+            captured["universe"] = universe
+            return {"universe": universe, "opportunities": [], "near_misses": [],
+                    "swap_recommendations": [], "scanned_count": 0,
+                    "data_quality": {"total_holdings": 0, "eligible_holdings": 0,
+                                     "holdings_with_data": 0, "candidates_found": 0,
+                                     "opportunities_found": 0, "scan_duration_seconds": 0.1},
+                    "data_status": "success"}
+        with patch("app.services.analysis_service.AnalysisService._do_trading_scan", side_effect=mock_scan):
+            client = TestClient(app)
+            r = client.get("/analytics/trading-opportunities?universe=portfolio_watchlist&refresh=true")
+        assert r.status_code == 200
+        assert captured["universe"] == "portfolio_watchlist"
+
+    def test_selected_universe(self):
+        from app.main import app
+        from fastapi.testclient import TestClient
+        from unittest.mock import patch
+        captured = {}
+        async def mock_scan(*args, **kwargs):
+            universe = kwargs.get("universe") or (args[2] if len(args) >= 3 else "selected")
+            captured["universe"] = universe
+            symbols_to_scan = kwargs.get("symbols_to_scan") or (args[0] if len(args) >= 1 else None)
+            syms = [s["symbol"] for s in (symbols_to_scan or [])]
+            return {"universe": universe, "scanned_count": len(syms),
+                    "opportunities": [{"symbol": s, "source": "Selected",
+                        "is_portfolio_holding": False, "company_name": s,
+                        "setup_type": "Bull Flag", "signal_strength": "Strong",
+                        "entry_price": 190.0, "stop_loss": 185.0, "target_1": 200.0,
+                        "risk_reward": 2.0, "technical_score": 75,
+                        "news_sentiment": 0.3, "news_summary": "Positive",
+                        "confirmation_factors": [], "red_flags": [],
+                        "news_freshness_days": 1, "overall_confidence": "Medium",
+                        "pattern": "Bullish", "entry_status": "Near entry",
+                        "price_context": {"current_price": 190.0, "day_change_pct": 1.0},
+                        "news_context": {}, "portfolio_context": {},
+                        "technical_breakdown": {}} for s in syms],
+                    "near_misses": [], "swap_recommendations": [],
+                    "data_quality": {"total_holdings": len(syms), "eligible_holdings": len(syms),
+                                     "holdings_with_data": len(syms), "candidates_found": len(syms),
+                                     "opportunities_found": len(syms), "scan_duration_seconds": 0.1},
+                    "data_status": "success"}
+        with patch("app.services.analysis_service.AnalysisService._do_trading_scan", side_effect=mock_scan):
+            client = TestClient(app)
+            r = client.get("/analytics/trading-opportunities?universe=selected&selected_symbols=AAPL,MSFT&refresh=true")
+        assert r.status_code == 200
+        assert captured["universe"] == "selected"
+        data = r.json().get("data", {})
+        assert data.get("scanned_count") == 2
+        for opp in data.get("opportunities", []):
+            assert opp.get("source") == "Selected"
+
+    def test_selected_empty_symbols(self):
+        from app.main import app
+        from fastapi.testclient import TestClient
+        from unittest.mock import patch
+        async def mock_scan(*args, **kwargs):
+            return {"universe": "selected", "scanned_count": 0,
+                    "opportunities": [], "near_misses": [], "swap_recommendations": [],
+                    "data_quality": {"total_holdings": 0, "eligible_holdings": 0,
+                                     "holdings_with_data": 0, "candidates_found": 0,
+                                     "opportunities_found": 0, "scan_duration_seconds": 0.0},
+                    "data_status": "success"}
+        with patch("app.services.analysis_service.AnalysisService._do_trading_scan", side_effect=mock_scan):
+            client = TestClient(app)
+            r = client.get("/analytics/trading-opportunities?universe=selected&refresh=true")
+        assert r.status_code == 200
+        data = r.json().get("data", {})
+        assert data.get("universe") == "selected"
+        assert data.get("scanned_count") == 0
+
+    def test_selected_deduplicates(self):
+        from app.main import app
+        from fastapi.testclient import TestClient
+        from unittest.mock import patch
+        captured_syms = []
+        async def mock_scan(*args, **kwargs):
+            symbols_to_scan = kwargs.get("symbols_to_scan") or (args[0] if len(args) >= 1 else None)
+            if symbols_to_scan:
+                captured_syms.extend([s["symbol"] for s in symbols_to_scan])
+            return {"universe": "selected", "scanned_count": len(symbols_to_scan or []),
+                    "opportunities": [], "near_misses": [], "swap_recommendations": [],
+                    "data_quality": {"total_holdings": 0, "eligible_holdings": 0,
+                                     "holdings_with_data": 0, "candidates_found": 0,
+                                     "opportunities_found": 0, "scan_duration_seconds": 0.0},
+                    "data_status": "success"}
+        with patch("app.services.analysis_service.AnalysisService._do_trading_scan", side_effect=mock_scan):
+            client = TestClient(app)
+            r = client.get("/analytics/trading-opportunities?universe=selected&selected_symbols=AAPL,AAPL,MSFT,AAPL&refresh=true")
+        assert r.status_code == 200
+        assert len(captured_syms) == 2
+        assert set(captured_syms) == {"AAPL", "MSFT"}
+
+    def test_selected_invalid_ticker_handled(self):
+        from app.main import app
+        from fastapi.testclient import TestClient
+        from unittest.mock import patch
+        async def mock_scan(*args, **kwargs):
+            return {"universe": "selected", "scanned_count": 0,
+                    "opportunities": [], "near_misses": [], "swap_recommendations": [],
+                    "data_quality": {"total_holdings": 0, "eligible_holdings": 0,
+                                     "holdings_with_data": 0, "candidates_found": 0,
+                                     "opportunities_found": 0, "scan_duration_seconds": 0.0},
+                    "data_status": "success"}
+        with patch("app.services.analysis_service.AnalysisService._do_trading_scan", side_effect=mock_scan):
+            client = TestClient(app)
+            r = client.get("/analytics/trading-opportunities?universe=selected&selected_symbols=ZZZZNOTREAL,AAPL&refresh=true")
+        assert r.status_code == 200
+        data = r.json().get("data", {})
+        assert data.get("universe") == "selected"
+
+    def test_source_labels_portfolio(self):
+        from app.main import app
+        from fastapi.testclient import TestClient
+        from unittest.mock import patch
+        async def mock_scan(*args, **kwargs):
+            return self._make_result(universe="portfolio")
+        with patch("app.services.analysis_service.AnalysisService._do_trading_scan", side_effect=mock_scan):
+            client = TestClient(app)
+            r = client.get("/analytics/trading-opportunities?universe=portfolio&refresh=true")
+        data = r.json().get("data", {})
+        for opp in data.get("opportunities", []):
+            assert opp.get("source") == "Portfolio"
+            assert opp.get("is_portfolio_holding") is True
+
+    def test_swap_recommendations_only_portfolio(self):
+        from app.main import app
+        from fastapi.testclient import TestClient
+        from unittest.mock import patch
+        async def mock_scan(*args, **kwargs):
+            return {"universe": "watchlist", "opportunities": [], "near_misses": [],
+                    "swap_recommendations": [], "scanned_count": 0,
+                    "data_quality": {"total_holdings": 0, "eligible_holdings": 0,
+                                     "holdings_with_data": 0, "candidates_found": 0,
+                                     "opportunities_found": 0, "scan_duration_seconds": 0.0},
+                    "data_status": "success"}
+        with patch("app.services.analysis_service.AnalysisService._do_trading_scan", side_effect=mock_scan):
+            client = TestClient(app)
+            r = client.get("/analytics/trading-opportunities?universe=watchlist&refresh=true")
+        data = r.json().get("data", {})
+        assert data.get("swap_recommendations", []) == []
+
+    def test_near_misses_any_universe(self):
+        from app.main import app
+        from fastapi.testclient import TestClient
+        from unittest.mock import patch
+        async def mock_scan(*args, **kwargs):
+            universe = kwargs.get("universe") or (args[2] if len(args) >= 3 else "watchlist")
+            return self._make_result(universe=universe)
+        with patch("app.services.analysis_service.AnalysisService._do_trading_scan", side_effect=mock_scan):
+            client = TestClient(app)
+            r = client.get("/analytics/trading-opportunities?universe=watchlist&refresh=true")
+        assert r.status_code == 200
+        data = r.json().get("data", {})
+        assert "near_misses" in data
+
+    def test_zero_opportunities_honest(self):
+        from app.main import app
+        from fastapi.testclient import TestClient
+        from unittest.mock import patch
+        async def mock_scan(*args, **kwargs):
+            return {"universe": "selected", "opportunities": [], "near_misses": [],
+                    "swap_recommendations": [], "scanned_count": 1,
+                    "data_quality": {"total_holdings": 1, "eligible_holdings": 1,
+                                     "holdings_with_data": 1, "candidates_found": 1,
+                                     "opportunities_found": 0, "scan_duration_seconds": 0.1},
+                    "data_status": "success"}
+        with patch("app.services.analysis_service.AnalysisService._do_trading_scan", side_effect=mock_scan):
+            client = TestClient(app)
+            r = client.get("/analytics/trading-opportunities?universe=selected&selected_symbols=AAPL&refresh=true")
+        assert r.status_code == 200
+        data = r.json().get("data", {})
+        assert data.get("data_status") == "success"
+        assert data.get("opportunities", []) == []
+
+    def test_cache_per_universe(self):
+        from app.main import app
+        from fastapi.testclient import TestClient
+        from unittest.mock import patch
+        universes_seen = []
+        async def mock_scan(*args, **kwargs):
+            universe = kwargs.get("universe") or (args[2] if len(args) >= 3 else "portfolio")
+            universes_seen.append(universe)
+            return self._make_result(universe=universe)
+        with patch("app.services.analysis_service.AnalysisService._do_trading_scan", side_effect=mock_scan):
+            client = TestClient(app)
+            client.get("/analytics/trading-opportunities?universe=portfolio&refresh=true")
+            client.get("/analytics/trading-opportunities?universe=watchlist&refresh=true")
+        assert "portfolio" in universes_seen
+        assert "watchlist" in universes_seen
+
+    def test_response_contract(self):
+        from app.main import app
+        from fastapi.testclient import TestClient
+        from unittest.mock import patch
+        async def mock_scan(*args, **kwargs):
+            universe = kwargs.get("universe") or (args[2] if len(args) >= 3 else "portfolio")
+            return self._make_result(universe=universe)
+        with patch("app.services.analysis_service.AnalysisService._do_trading_scan", side_effect=mock_scan):
+            client = TestClient(app)
+            for universe in ["portfolio", "watchlist", "portfolio_watchlist", "selected"]:
+                params = {"universe": universe, "refresh": "true"}
+                if universe == "selected":
+                    params["selected_symbols"] = "AAPL"
+                r = client.get("/analytics/trading-opportunities", params=params)
+                assert r.status_code == 200, f"Failed for universe={universe}"
+                data = r.json().get("data", {})
+                for key in ("opportunities", "near_misses", "swap_recommendations",
+                             "universe", "scanned_count", "data_quality"):
+                    assert key in data, f"Missing {key} for {universe}"
+                assert data["universe"] == universe
